@@ -27,6 +27,11 @@
 #include "BackgroundMeshTools.h"
 #include "STensor3.h"
 #include "ExtrudeParams.h"
+#include "SPoint2.h"
+#include "GEdge.h"
+#include "GFace.h"
+#include "MVertex.h"
+#include "MQuadrangle.h"
 #include "automaticMeshSizeField.h"
 #include "nanoflann.hpp"
 
@@ -2978,11 +2983,199 @@ void BoundaryLayerField::operator()(double x, double y, double z,
   metr = v;
 }
 
+// ---------------------------------------------------------------------------
+// BoundaryCornerField
+// ---------------------------------------------------------------------------
+
+std::string BoundaryCornerField::getDescription()
+{
+  return "Structured quad columns at the corner where a boundary-layer profile "
+         "meets the symmetry axis at 90 degrees (typical OpenFOAM wedge mesh).";
+}
+
+BoundaryCornerField::BoundaryCornerField()
+  : h1_(1e-3), ratio_(1.15), nbLayers_(30),
+    nbCornerColumns_(10), delta1_(-1.0), omega_(1.0),
+    eps_(1.0), hTotal_(0.0)
+{
+  axisPoint_[0]  = axisPoint_[1]  = 0.0;
+  startPoint_[0] = startPoint_[1] = 0.0;
+
+  options["CurvesList"] = new FieldOptionList(
+    curvesList_, "Tags of the profile curves", &update_needed);
+  options["AxisPoint"] = new FieldOptionListDouble(
+    axisPointList_, "Critical point on the axis [x_a, 0.0]", &update_needed);
+  options["StartPoint"] = new FieldOptionListDouble(
+    startPointList_, "Start point of the BC zone on the profile [x_s, y_s]",
+    &update_needed);
+  options["Size"] = new FieldOptionDouble(
+    h1_, "Height of the first BL row", &update_needed);
+  options["Ratio"] = new FieldOptionDouble(
+    ratio_, "Geometric growth ratio between successive BL rows", &update_needed);
+  options["NbLayers"] = new FieldOptionInt(
+    nbLayers_, "Number of BL rows", &update_needed);
+  options["NbCornerColumns"] = new FieldOptionInt(
+    nbCornerColumns_, "Number of quad columns in the BC zone", &update_needed);
+  options["Delta1"] = new FieldOptionDouble(
+    delta1_, "Length of the last BC cell along the profile (-1 = Size)",
+    &update_needed);
+  options["Omega"] = new FieldOptionDouble(
+    omega_, "Height scale factor for BC rows (default 1.0)", &update_needed);
+}
+
+void BoundaryCornerField::computeParameters()
+{
+  if(delta1_ < 0.0) delta1_ = h1_;
+
+  // extract axisPoint_ and startPoint_ from their option lists
+  {
+    auto it = axisPointList_.begin();
+    axisPoint_[0] = (it != axisPointList_.end()) ? *it++ : 0.0;
+    axisPoint_[1] = (it != axisPointList_.end()) ? *it   : 0.0;
+  }
+  {
+    auto it = startPointList_.begin();
+    startPoint_[0] = (it != startPointList_.end()) ? *it++ : 0.0;
+    startPoint_[1] = (it != startPointList_.end()) ? *it   : 0.0;
+  }
+
+  if(std::abs(ratio_ - 1.0) < 1e-10)
+    hTotal_ = h1_ * nbLayers_;
+  else
+    hTotal_ = h1_ * (std::pow(ratio_, nbLayers_) - 1.0) / (ratio_ - 1.0);
+
+  if(curvesList_.empty()) { eps_ = 1.0; return; }
+
+  GEdge *ge = GModel::current()->getEdgeByTag(curvesList_.front());
+  if(!ge || ge->mesh_vertices.empty()) { eps_ = 1.0; return; }
+
+  double l = ge->length() /
+             std::max(1, (int)ge->mesh_vertices.size());
+
+  eps_ = (nbCornerColumns_ > 1)
+           ? std::pow(delta1_ / l, 1.0 / (nbCornerColumns_ - 1))
+           : 1.0;
+}
+
+// Returns parameter t on ge closest to (x, y)
+double BoundaryCornerField::arcLengthToParam(GEdge *ge, double x, double y)
+{
+  double t = 0.0;
+  SPoint3 p(x, y, 0.0);
+  ge->closestPoint(p, t);
+  return t;
+}
+
+// Unit inward normal at parameter t (rotate tangent 90° CCW)
+SPoint2 BoundaryCornerField::normalAtPoint(GEdge *ge, double t)
+{
+  SVector3 d = ge->firstDer(t);
+  double len = d.norm();
+  if(len < 1e-14) return SPoint2(0.0, 1.0);
+  return SPoint2(-d.y() / len, d.x() / len);
+}
+
+void BoundaryCornerField::buildCornerColumns(GModel *gm)
+{
+  computeParameters();
+  if(curvesList_.empty()) return;
+
+  GEdge *ge = gm->getEdgeByTag(curvesList_.front());
+  if(!ge) return;
+
+  // Find the GFace that owns this GEdge
+  GFace *gf = nullptr;
+  for(auto it = gm->firstFace(); it != gm->lastFace(); ++it) {
+    for(auto *e : (*it)->edges()) {
+      if(e == ge) { gf = *it; break; }
+    }
+    if(gf) break;
+  }
+  if(!gf) return;
+
+  int N = nbCornerColumns_;
+
+  // Profile points: start → axis, N+1 nodes, geometric spacing eps_
+  std::vector<SPoint2> prof(N + 1), axe(N + 1), top(N + 1);
+
+  prof[0] = SPoint2(startPoint_[0], startPoint_[1]);
+  for(int i = 1; i < N; i++) {
+    double Li = h1_ * std::pow(eps_, i - 1);
+    // advance Li along the curve from prof[i-1]
+    double t0 = arcLengthToParam(ge, prof[i - 1].x(), prof[i - 1].y());
+    // crude arc-length step in parameter space
+    double speed = ge->firstDer(t0).norm();
+    double dt    = (speed > 1e-14) ? Li / speed : 0.0;
+    Range<double> bounds = ge->parBounds(0);
+    double t1 = std::min(t0 + dt, bounds.high());
+    GPoint gp = ge->point(t1);
+    prof[i] = SPoint2(gp.x(), gp.y());
+  }
+  prof[N] = SPoint2(axisPoint_[0], axisPoint_[1]);
+
+  // Axis row (y = 0) and BL-top row (offset along normal by hTotal_)
+  for(int i = 0; i <= N; i++) {
+    axe[i] = SPoint2(prof[i].x(), 0.0);
+    double t  = arcLengthToParam(ge, prof[i].x(), prof[i].y());
+    SPoint2 n = normalAtPoint(ge, t);
+    top[i] = SPoint2(prof[i].x() + n.x() * hTotal_,
+                     prof[i].y() + n.y() * hTotal_);
+  }
+
+  // Build MVertex/MQuadrangle grids column by column
+  // Each column i spans prof[i]→prof[i+1] (profile side) with nbLayers_ rows
+  for(int i = 0; i < N; i++) {
+    // Row of vertices: (nbLayers_+1) heights × 2 lateral nodes
+    std::vector<MVertex *> col_prof(nbLayers_ + 1), col_axe(nbLayers_ + 1);
+
+    for(int k = 0; k <= nbLayers_; k++) {
+      double hk = (k == 0) ? 0.0
+                : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
+      double frac = hk / hTotal_;
+
+      // between prof[i] and axe[i]  (lower nappe)
+      double xl = prof[i].x() + (axe[i].x() - prof[i].x()) * frac;
+      double yl = prof[i].y() * (1.0 - frac);
+      col_axe[k] = new MVertex(xl, yl, 0.0, gf);
+      gf->mesh_vertices.push_back(col_axe[k]);
+
+      // between prof[i] and top[i]  (upper nappe)
+      double xu = prof[i].x() + (top[i].x() - prof[i].x()) * frac;
+      double yu = prof[i].y() + (top[i].y() - prof[i].y()) * frac;
+      col_prof[k] = new MVertex(xu, yu, 0.0, gf);
+      gf->mesh_vertices.push_back(col_prof[k]);
+    }
+
+    // Assemble quads: k row, column i  (4 corners)
+    for(int k = 0; k < nbLayers_; k++) {
+      gf->quadrangles.push_back(
+        new MQuadrangle(col_axe[k], col_axe[k + 1],
+                        col_prof[k + 1], col_prof[k]));
+    }
+  }
+}
+
+double BoundaryCornerField::operator()(double x, double y, double z,
+                                       GEntity *ge)
+{
+  computeParameters();
+  double dx   = x - axisPoint_[0];
+  double dy   = y - axisPoint_[1];
+  double dist = std::sqrt(dx * dx + dy * dy);
+  double zone = hTotal_ * 5.0;
+  if(dist < zone)
+    return delta1_ + (h1_ - delta1_) * dist / zone;
+  return 1e22;
+}
+
+// ---------------------------------------------------------------------------
+
 FieldManager::FieldManager()
 {
   map_type_name["Structured"] = new FieldFactoryT<StructuredField>();
   map_type_name["Threshold"] = new FieldFactoryT<ThresholdField>();
   map_type_name["BoundaryLayer"] = new FieldFactoryT<BoundaryLayerField>();
+  map_type_name["BoundaryCorner"] = new FieldFactoryT<BoundaryCornerField>();
   map_type_name["Box"] = new FieldFactoryT<BoxField>();
   map_type_name["Cylinder"] = new FieldFactoryT<CylinderField>();
   map_type_name["Ball"] = new FieldFactoryT<BallField>();

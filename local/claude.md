@@ -327,16 +327,55 @@ via le mécanisme existant `setNumber`/`getNumber` — chercher comment
 
 ## Ordre d'implémentation recommandé
 
-1. `Field.h` — déclaration de la classe (5 min)
-2. `Field.cpp` — constructeur + enregistrement dans `fieldFactory` (30 min)
-3. `Field.cpp` — `computeParameters()` et `operator()` (30 min)
-4. `Common/Context.h` + `Context.cpp` — ajout de `boundaryCornerField` (10 min)
-5. `Mesh/meshGModel.cpp` — branchement avant `meshGFaces` (15 min)
-6. Build et test de l'enregistrement du champ (vérifie que gmsh reconnaît
-   "BoundaryCorner" sans crash) : `gmsh.model.mesh.field.add("BoundaryCorner")`
-7. `Field.cpp` — `buildCornerColumns()` en commençant par un cas dégénéré
-   `nbCornerColumns_ = 1` pour valider la création de MVertex/MQuadrangle
-8. Extension à `nbCornerColumns_ > 1` et validation qualité
+- [x] 1. `Field.h` — déclaration de la classe  
+- [x] 2. `Field.cpp` — constructeur + `computeParameters()` + `operator()` +
+         `buildCornerColumns()` + `arcLengthToParam()` + `normalAtPoint()` +
+         enregistrement dans `map_type_name`  
+- [ ] 3. `Common/Context.h` + `Context.cpp` — ajout de `boundaryCornerField`  
+- [ ] 4. `Mesh/meshGModel.cpp` — branchement avant `meshGFaces`  
+- [ ] 5. Build complet + test Python : `gmsh.model.mesh.field.add("BoundaryCorner")`  
+- [ ] 6. Validation qualité mesh (`buildCornerColumns` avec `nbCornerColumns_ > 1`)
+
+## Progression — état au 2026-06-08
+
+### ✅ Field.h (terminé)
+
+Stub cassé remplacé par la déclaration complète de `BoundaryCornerField`.
+Forward declarations ajoutées : `GModel`, `GEdge`, `GFace`, `SPoint2`.
+
+Membres privés — options exposées via `FieldOption*` :
+- `curvesList_` (`std::list<int>`) — `CurvesList`
+- `axisPointList_`, `startPointList_` (`std::list<double>`) — `AxisPoint`, `StartPoint`
+- `h1_`, `ratio_`, `delta1_`, `omega_` (`double`) — `Size`, `Ratio`, `Delta1`, `Omega`
+- `nbLayers_`, `nbCornerColumns_` (`int`) — `NbLayers`, `NbCornerColumns`
+
+Membres privés — données calculées : `axisPoint_[2]`, `startPoint_[2]`, `eps_`, `hTotal_`.
+
+Méthodes publiques : `BoundaryCornerField()`, `operator()`, `getName()`,
+`getDescription()`, `buildCornerColumns(GModel*)`.
+
+Méthodes privées : `computeParameters()`, `arcLengthToParam(GEdge*,x,y)`,
+`normalAtPoint(GEdge*,t)`.
+
+### ✅ Field.cpp (terminé)
+
+Includes ajoutés : `SPoint2.h`, `GEdge.h`, `GFace.h`, `MVertex.h`,
+`MQuadrangle.h`.
+
+Toutes les méthodes sont implémentées et le champ est enregistré :
+```cpp
+map_type_name["BoundaryCorner"] = new FieldFactoryT<BoundaryCornerField>();
+```
+
+`Field.cpp` compile sans erreur C++. Le linker échoue sur un bug préexistant
+dans `contrib/mmg3d` (définitions multiples dans ses headers) sans lien avec
+nos modifications.
+
+### Note sur `buildCornerColumns`
+
+Implémentation actuelle : avance le long de la courbe par approximation
+au premier ordre (`Li / speed * dt`). Suffit pour un premier test ; à
+affiner avec une intégration arc-length si la courbe est fortement courbée.
 
 ---
 
