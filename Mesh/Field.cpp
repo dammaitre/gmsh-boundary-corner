@@ -3027,7 +3027,7 @@ BoundaryCornerField::BoundaryCornerField()
 
 void BoundaryCornerField::computeParameters()
 {
-  if(update_needed) edgeLengthCached_ = false;
+  if(update_needed) { edgeLengthCached_ = false; update_needed = false; }
   if(delta1_ < 0.0) delta1_ = h1_;
 
   // extract axisPoint_ and startPoint_ from their option lists
