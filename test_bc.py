@@ -1,10 +1,11 @@
-import sys, os
+import sys, os, subprocess
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "api"))
 os.environ["GMSH_LIB"] = os.path.join(os.path.dirname(__file__), "build", "libgmsh.so")
 
 import gmsh
 
-gmsh.initialize(["gmsh", "-nopopup"])
+gui = "--gui" in sys.argv
+gmsh.initialize(["gmsh"] if gui else ["gmsh", "-nopopup"])
 gmsh.model.add("test_bc")
 
 p1 = gmsh.model.geo.addPoint(0, 0, 0, 0.1)
@@ -44,4 +45,8 @@ for t, tags in zip(elem_types, elem_tags):
 
 gmsh.write("/tmp/test_bc.msh")
 print("\nfichier écrit : /tmp/test_bc.msh")
+
+if gui:
+    subprocess.run(["/usr/bin/gmsh", "/tmp/test_bc.msh"])
+
 gmsh.finalize()
