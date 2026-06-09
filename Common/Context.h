@@ -39,6 +39,7 @@ struct contextMeshOptions {
   std::map<int, int> curvatureControlPerFace;
   int NewtonConvergenceTestXYZ;
   int ignorePeriodicity, boundaryLayerFanPoints;
+  int boundaryCornerField;
   int maxNumThreads1D, maxNumThreads2D, maxNumThreads3D;
   double angleToleranceFacetOverlap;
   int renumber, compoundClassify;
