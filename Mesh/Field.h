@@ -235,6 +235,47 @@ public:
   void removeAttractors();
 };
 
+class GModel;
+class GEdge;
+class GFace;
+class SPoint2;
+
+class BoundaryCornerField : public Field {
+public:
+  BoundaryCornerField();
+  ~BoundaryCornerField() override = default;
+
+  double operator()(double x, double y, double z,
+                    GEntity *ge = nullptr) override;
+  const char *getName() override { return "BoundaryCorner"; }
+  std::string getDescription() override;
+
+  void buildCornerColumns(GModel *gm);
+
+private:
+  // Options exposées via FieldOption*
+  std::list<int>    curvesList_;       // CurvesList      : tags des GEdge du profil
+  std::list<double> axisPointList_;    // AxisPoint       : [x_a, 0.0]
+  std::list<double> startPointList_;   // StartPoint      : [x_s, y_s]
+  double h1_;                          // Size            : hauteur 1ère rangée BL
+  double ratio_;                       // Ratio           : raison progression BL
+  int    nbLayers_;                    // NbLayers        : nombre de rangées BL
+  int    nbCornerColumns_;             // NbCornerColumns : nombre de colonnes BC
+  double delta1_;                      // Delta1          : longueur dernière cellule (-1 = Size)
+  double omega_;                       // Omega           : facteur hauteur (défaut 1.0)
+
+  // Données calculées par computeParameters() / buildCornerColumns()
+  double axisPoint_[2];
+  double startPoint_[2];
+  double eps_;
+  double hTotal_;
+
+  // Méthodes privées
+  void    computeParameters();
+  double  arcLengthToParam(GEdge *ge, double x, double y);
+  SPoint2 normalAtPoint(GEdge *ge, double t);
+};
+
 class FieldOptionString : public FieldOption {
 public:
   std::string &val;
