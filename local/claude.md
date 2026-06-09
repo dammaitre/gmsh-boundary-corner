@@ -331,12 +331,12 @@ via le mécanisme existant `setNumber`/`getNumber` — chercher comment
 - [x] 2. `Field.cpp` — constructeur + `computeParameters()` + `operator()` +
          `buildCornerColumns()` + `arcLengthToParam()` + `normalAtPoint()` +
          enregistrement dans `map_type_name`  
-- [ ] 3. `Common/Context.h` + `Context.cpp` — ajout de `boundaryCornerField`  
-- [ ] 4. `Mesh/meshGModel.cpp` — branchement avant `meshGFaces`  
-- [ ] 5. Build complet + test Python : `gmsh.model.mesh.field.add("BoundaryCorner")`  
-- [ ] 6. Validation qualité mesh (`buildCornerColumns` avec `nbCornerColumns_ > 1`)
+- [x] 3. `Common/Context.h` + `Context.cpp` — ajout de `boundaryCornerField`  
+- [x] 4. `Mesh/Generator.cpp` — branchement POST-maillage (voir note ci-dessous)  
+- [x] 5. Build complet + test Python : 20 quads + 1983 triangles — pipeline OK  
+- [ ] 6. Validation qualité mesh — raccordement frontière quads/triangles
 
-## Progression — état au 2026-06-08
+## Progression — état au 2026-06-09
 
 ### ✅ Field.h (terminé)
 
@@ -359,7 +359,7 @@ Méthodes privées : `computeParameters()`, `arcLengthToParam(GEdge*,x,y)`,
 
 ### ✅ Field.cpp (terminé)
 
-Includes ajoutés : `SPoint2.h`, `GEdge.h`, `GFace.h`, `MVertex.h`,
+Includes : `SPoint2.h`, `GEdge.h`, `GFace.h`, `MVertex.h`, `MTriangle.h`,
 `MQuadrangle.h`.
 
 Toutes les méthodes sont implémentées et le champ est enregistré :
@@ -367,15 +367,77 @@ Toutes les méthodes sont implémentées et le champ est enregistré :
 map_type_name["BoundaryCorner"] = new FieldFactoryT<BoundaryCornerField>();
 ```
 
-`Field.cpp` compile sans erreur C++. Le linker échoue sur un bug préexistant
-dans `contrib/mmg3d` (définitions multiples dans ses headers) sans lien avec
-nos modifications.
+`Field.cpp` compile sans erreur C++.
 
-### Note sur `buildCornerColumns`
+#### buildCornerColumns — approche post-traitement (décision architecturale)
 
-Implémentation actuelle : avance le long de la courbe par approximation
-au premier ordre (`Li / speed * dt`). Suffit pour un premier test ; à
-affiner avec une intégration arc-length si la courbe est fortement courbée.
+La spec initiale proposait d'injecter les quads **avant** `meshGFaces()`. Cette
+approche ne fonctionne pas : `meshGenerator()` appelle `gf->GFace::deleteMesh()`
+à la ligne 1690 de `meshGFace.cpp`, ce qui efface tous les éléments pré-injectés.
+
+**Solution retenue** : appel **après** le maillage 2D complet, dans `Generator.cpp`.
+`buildCornerColumns` fonctionne en post-processeur :
+1. Calcule la grille structurée `grid[i][k]` (colonnes × hauteurs)
+2. Supprime les triangles dont le centroïde est dans la zone corner
+   (x ∈ [xMin, xMax], y ∈ [0, hTotal_ × 1.05])
+3. Purge les sommets orphelins
+4. Injecte les `N × nbLayers_` `MQuadrangle`
+
+Limitation actuelle : la frontière entre la zone quads et la zone triangles
+n'est pas raccordée (gap) — les sommets des quads ne coïncident pas avec les
+nœuds des triangles voisins. À résoudre en étape 6.
+
+#### mmg3d désactivé
+
+Le linker échouait sur des définitions multiples dans `contrib/mmg3d` (bug
+préexistant de la version 4.0 bundlée, sans lien avec nos modifications).
+Désactivé avec `-DENABLE_MMG3D=OFF` dans CMake. Sans impact sur notre feature
+(mmg3d = raffinement volumique 3D anisotrope).
+
+Build : `cd build && cmake .. -DENABLE_MMG3D=OFF && make -j$(nproc)`
+
+### ✅ Context.h / Context.cpp (terminé)
+
+`mesh.boundaryCornerField` ajouté comme `int` dans `contextMeshOptions`,
+initialisé à 0.
+
+### ✅ Options.cpp / Options.h / DefaultOptions.h (terminé)
+
+`Mesh.BoundaryCornerField` enregistré dans le système d'options gmsh via
+`opt_mesh_boundary_corner_field()`. Accessible depuis Python :
+```python
+gmsh.option.setNumber("Mesh.BoundaryCornerField", tag)
+```
+
+### ✅ Generator.cpp (terminé)
+
+Hook inséré **après** la boucle de maillage 2D, avant
+`Msg::SetNumThreads(prevNumThreads)`. Itère sur tous les champs actifs,
+appelle `bc->buildCornerColumns(m)` pour chaque `BoundaryCornerField` trouvé.
+
+### ✅ Test Python (terminé — `test_bc.py`)
+
+Carré unitaire, profil sur y=0, coin en (1,0) :
+- 20 quads injectés (4 colonnes × 5 couches)
+- 1983 triangles dans le reste de la surface
+- Pipeline de bout en bout sans crash
+
+Note : `printf("coucou\n")` dans la sortie — debug préexistant dans
+`Mesh/automaticMeshSizeField.cpp:138`, sans lien avec notre code.
+
+### ⏳ Étape 6 — Raccordement frontière quads/triangles
+
+Problème : les sommets des quads injectés ne coïncident pas avec les nœuds des
+triangles voisins → gap dans le maillage, invalide pour CFD.
+
+Approches envisagées :
+- **Snap** : après injection des quads, déplacer les nœuds triangles du bord
+  vers les sommets de quads les plus proches
+- **Retriangulation locale** : supprimer une bande plus large de triangles et
+  retrianguler en fixant les nœuds des quads comme contraintes
+- **Contraintes Delaunay** : passer les arêtes du bord de la grille quad comme
+  `embedded edges` dans la GFace avant maillage, forçant le Delaunay à les
+  respecter — nécessite de revenir à une approche pré-maillage partielle
 
 ---
 
