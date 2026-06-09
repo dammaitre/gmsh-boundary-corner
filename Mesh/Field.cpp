@@ -3177,8 +3177,77 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
     }
   }
 
-  Msg::Info("BoundaryCorner: injected %d quads in face %d",
-            N * nbLayers_, gf->tag());
+  // --- SNAP: merge fringe triangle vertices onto the quad boundary ---
+  // Build a set of all grid vertices (to skip them in the snap loop)
+  std::set<MVertex *> gridSet;
+  for(int i = 0; i <= N; i++)
+    for(int k = 0; k <= nbLayers_; k++)
+      gridSet.insert(grid[i][k]);
+
+  // Quad boundary facing the triangles: top row + side columns (k=1..nbLayers_-1)
+  std::vector<MVertex *> qBdry;
+  for(int i = 0; i <= N; i++)        qBdry.push_back(grid[i][nbLayers_]);
+  for(int k = 1; k < nbLayers_; k++) qBdry.push_back(grid[0][k]);
+  for(int k = 1; k < nbLayers_; k++) qBdry.push_back(grid[N][k]);
+
+  // For each non-grid vertex inside the deletion zone, snap to nearest boundary vertex
+  std::map<MVertex *, MVertex *> snapMap;
+  for(std::vector<MVertex *>::iterator it = gf->mesh_vertices.begin();
+      it != gf->mesh_vertices.end(); ++it) {
+    MVertex *v = *it;
+    if(gridSet.count(v)) continue;
+    if(v->x() < xMin || v->x() > xMax || v->y() < yMin || v->y() > yMax) continue;
+    double bestD2 = 1e30;
+    MVertex *bestQ = nullptr;
+    for(std::vector<MVertex *>::iterator jt = qBdry.begin(); jt != qBdry.end(); ++jt) {
+      MVertex *q = *jt;
+      double dx = v->x() - q->x(), dy = v->y() - q->y();
+      double d2 = dx * dx + dy * dy;
+      if(d2 < bestD2) { bestD2 = d2; bestQ = q; }
+    }
+    if(bestQ) snapMap[v] = bestQ;
+  }
+
+  // Replace references in triangles
+  for(std::vector<MTriangle *>::iterator it = gf->triangles.begin();
+      it != gf->triangles.end(); ++it) {
+    MTriangle *tri = *it;
+    for(int j = 0; j < 3; j++) {
+      std::map<MVertex *, MVertex *>::iterator sm = snapMap.find(tri->getVertex(j));
+      if(sm != snapMap.end()) tri->setVertex(j, sm->second);
+    }
+  }
+
+  // Remove degenerate triangles (snapping can merge two vertices of the same triangle)
+  {
+    std::vector<MTriangle *> validTri;
+    for(std::vector<MTriangle *>::iterator it = gf->triangles.begin();
+        it != gf->triangles.end(); ++it) {
+      MTriangle *tri = *it;
+      MVertex *a = tri->getVertex(0), *b = tri->getVertex(1), *c = tri->getVertex(2);
+      if(a == b || b == c || a == c) delete tri;
+      else validTri.push_back(tri);
+    }
+    gf->triangles = validTri;
+  }
+
+  // Purge replaced vertices from gf->mesh_vertices
+  {
+    std::set<MVertex *> replaced;
+    for(std::map<MVertex *, MVertex *>::iterator it = snapMap.begin();
+        it != snapMap.end(); ++it)
+      replaced.insert(it->first);
+    std::vector<MVertex *> finalV;
+    for(std::vector<MVertex *>::iterator it = gf->mesh_vertices.begin();
+        it != gf->mesh_vertices.end(); ++it) {
+      if(replaced.count(*it)) delete *it;
+      else finalV.push_back(*it);
+    }
+    gf->mesh_vertices = finalV;
+  }
+
+  Msg::Info("BoundaryCorner: injected %d quads, snapped %d vertices (face %d)",
+            N * nbLayers_, (int)snapMap.size(), gf->tag());
 }
 
 double BoundaryCornerField::operator()(double x, double y, double z,

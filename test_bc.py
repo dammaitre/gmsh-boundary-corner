@@ -4,7 +4,7 @@ os.environ["GMSH_LIB"] = os.path.join(os.path.dirname(__file__), "build", "libgm
 
 import gmsh
 
-gmsh.initialize()
+gmsh.initialize(["gmsh", "-nopopup"])
 gmsh.model.add("test_bc")
 
 p1 = gmsh.model.geo.addPoint(0, 0, 0, 0.1)
