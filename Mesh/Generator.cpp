@@ -503,15 +503,6 @@ static void Mesh2D(GModel *m)
   for(GModel::fiter it = m->firstFace(); it != m->lastFace(); ++it)
     (*it)->meshStatistics.status = GFace::PENDING;
 
-  // inject BoundaryCorner structured columns before general face meshing
-  if(CTX::instance()->mesh.boundaryCornerField > 0) {
-    FieldManager *fields = m->getFields();
-    for(auto &[tag, field] : *fields) {
-      BoundaryCornerField *bc = dynamic_cast<BoundaryCornerField *>(field);
-      if(bc) bc->buildCornerColumns(m);
-    }
-  }
-
   // boundary layers are special: their generation (including vertices and curve
   // meshes) is global as it depends on a smooth normal field generated from the
   // surface mesh of the source surfaces
@@ -548,6 +539,17 @@ static void Mesh2D(GModel *m)
       // serialize (self-intersections of 1D meshes are not thread safe)!
       if(nIter > 2) Msg::SetNumThreads(1);
       if(nIter++ > 10) break;
+    }
+  }
+
+  // Post-process: inject BoundaryCorner structured quad columns
+  // Called after face meshing so that mesh_vertices are available and
+  // the injected quads cannot be erased by meshGenerator's deleteMesh.
+  if(CTX::instance()->mesh.boundaryCornerField > 0) {
+    FieldManager *fields = m->getFields();
+    for(auto &[tag, field] : *fields) {
+      BoundaryCornerField *bc = dynamic_cast<BoundaryCornerField *>(field);
+      if(bc) bc->buildCornerColumns(m);
     }
   }
 

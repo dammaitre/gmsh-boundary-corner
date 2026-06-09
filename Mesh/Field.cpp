@@ -31,6 +31,7 @@
 #include "GEdge.h"
 #include "GFace.h"
 #include "MVertex.h"
+#include "MTriangle.h"
 #include "MQuadrangle.h"
 #include "automaticMeshSizeField.h"
 #include "nanoflann.hpp"
@@ -3095,15 +3096,12 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
 
   int N = nbCornerColumns_;
 
-  // Profile points: start → axis, N+1 nodes, geometric spacing eps_
-  std::vector<SPoint2> prof(N + 1), axe(N + 1), top(N + 1);
-
+  // --- Build profile points (N+1 nodes from startPoint to axisPoint) ---
+  std::vector<SPoint2> prof(N + 1);
   prof[0] = SPoint2(startPoint_[0], startPoint_[1]);
   for(int i = 1; i < N; i++) {
     double Li = h1_ * std::pow(eps_, i - 1);
-    // advance Li along the curve from prof[i-1]
-    double t0 = arcLengthToParam(ge, prof[i - 1].x(), prof[i - 1].y());
-    // crude arc-length step in parameter space
+    double t0  = arcLengthToParam(ge, prof[i - 1].x(), prof[i - 1].y());
     double speed = ge->firstDer(t0).norm();
     double dt    = (speed > 1e-14) ? Li / speed : 0.0;
     Range<double> bounds = ge->parBounds(0);
@@ -3113,46 +3111,74 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
   }
   prof[N] = SPoint2(axisPoint_[0], axisPoint_[1]);
 
-  // Axis row (y = 0) and BL-top row (offset along normal by hTotal_)
+  // --- Build 2D grid: grid[i][k] at column i, height k ---
+  // height k=0 on profile, k=nbLayers_ at BL-top offset
+  std::vector<std::vector<MVertex *>> grid(N + 1,
+    std::vector<MVertex *>(nbLayers_ + 1, nullptr));
+
   for(int i = 0; i <= N; i++) {
-    axe[i] = SPoint2(prof[i].x(), 0.0);
-    double t  = arcLengthToParam(ge, prof[i].x(), prof[i].y());
-    SPoint2 n = normalAtPoint(ge, t);
-    top[i] = SPoint2(prof[i].x() + n.x() * hTotal_,
-                     prof[i].y() + n.y() * hTotal_);
-  }
-
-  // Build MVertex/MQuadrangle grids column by column
-  // Each column i spans prof[i]→prof[i+1] (profile side) with nbLayers_ rows
-  for(int i = 0; i < N; i++) {
-    // Row of vertices: (nbLayers_+1) heights × 2 lateral nodes
-    std::vector<MVertex *> col_prof(nbLayers_ + 1), col_axe(nbLayers_ + 1);
-
+    double ti = arcLengthToParam(ge, prof[i].x(), prof[i].y());
+    SPoint2 ni = normalAtPoint(ge, ti);
     for(int k = 0; k <= nbLayers_; k++) {
       double hk = (k == 0) ? 0.0
                 : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
-      double frac = hk / hTotal_;
-
-      // between prof[i] and axe[i]  (lower nappe)
-      double xl = prof[i].x() + (axe[i].x() - prof[i].x()) * frac;
-      double yl = prof[i].y() * (1.0 - frac);
-      col_axe[k] = new MVertex(xl, yl, 0.0, gf);
-      gf->mesh_vertices.push_back(col_axe[k]);
-
-      // between prof[i] and top[i]  (upper nappe)
-      double xu = prof[i].x() + (top[i].x() - prof[i].x()) * frac;
-      double yu = prof[i].y() + (top[i].y() - prof[i].y()) * frac;
-      col_prof[k] = new MVertex(xu, yu, 0.0, gf);
-      gf->mesh_vertices.push_back(col_prof[k]);
-    }
-
-    // Assemble quads: k row, column i  (4 corners)
-    for(int k = 0; k < nbLayers_; k++) {
-      gf->quadrangles.push_back(
-        new MQuadrangle(col_axe[k], col_axe[k + 1],
-                        col_prof[k + 1], col_prof[k]));
+      double x = prof[i].x() + ni.x() * hk;
+      double y = prof[i].y() + ni.y() * hk;
+      MVertex *v = new MVertex(x, y, 0.0, gf);
+      gf->mesh_vertices.push_back(v);
+      grid[i][k] = v;
     }
   }
+
+  // --- Remove triangles whose centroid falls inside the corner zone ---
+  // Zone: x in [xMin,xMax], y in [yMin, yMin + hTotal_*(1+tol)]
+  double xMin = std::min(startPoint_[0], axisPoint_[0]);
+  double xMax = std::max(startPoint_[0], axisPoint_[0]);
+  double yMin = std::min(startPoint_[1], axisPoint_[1]);
+  double yMax = yMin + hTotal_ * 1.05;
+
+  std::vector<MTriangle *> keep;
+  for(auto *tri : gf->triangles) {
+    double cx = (tri->getVertex(0)->x() + tri->getVertex(1)->x() +
+                 tri->getVertex(2)->x()) / 3.0;
+    double cy = (tri->getVertex(0)->y() + tri->getVertex(1)->y() +
+                 tri->getVertex(2)->y()) / 3.0;
+    if(cx >= xMin && cx <= xMax && cy >= yMin && cy <= yMax)
+      delete tri;
+    else
+      keep.push_back(tri);
+  }
+  gf->triangles = keep;
+
+  // Purge vertices no longer referenced by any element
+  std::set<MVertex *> used;
+  for(auto *t : gf->triangles)
+    for(int j = 0; j < 3; j++) used.insert(t->getVertex(j));
+  for(auto *q : gf->quadrangles)
+    for(int j = 0; j < 4; j++) used.insert(q->getVertex(j));
+  // grid vertices will be inserted below — add them too
+  for(int i = 0; i <= N; i++)
+    for(int k = 0; k <= nbLayers_; k++)
+      used.insert(grid[i][k]);
+
+  std::vector<MVertex *> keptVerts;
+  for(auto *v : gf->mesh_vertices) {
+    if(used.count(v)) keptVerts.push_back(v);
+    else delete v;
+  }
+  gf->mesh_vertices = keptVerts;
+
+  // --- Insert structured quads ---
+  for(int i = 0; i < N; i++) {
+    for(int k = 0; k < nbLayers_; k++) {
+      gf->quadrangles.push_back(new MQuadrangle(
+        grid[i][k],     grid[i + 1][k],
+        grid[i + 1][k + 1], grid[i][k + 1]));
+    }
+  }
+
+  Msg::Info("BoundaryCorner: injected %d quads in face %d",
+            N * nbLayers_, gf->tag());
 }
 
 double BoundaryCornerField::operator()(double x, double y, double z,

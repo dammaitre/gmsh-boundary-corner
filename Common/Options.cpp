@@ -5910,6 +5910,13 @@ double opt_mesh_boundary_layer_fan_points(OPT_ARGS_NUM)
   return CTX::instance()->mesh.boundaryLayerFanPoints;
 }
 
+double opt_mesh_boundary_corner_field(OPT_ARGS_NUM)
+{
+  if(action & GMSH_SET)
+    CTX::instance()->mesh.boundaryCornerField = (int)val;
+  return CTX::instance()->mesh.boundaryCornerField;
+}
+
 double opt_mesh_smooth_cross_field(OPT_ARGS_NUM)
 {
   if(action & GMSH_SET)
