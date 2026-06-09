@@ -269,6 +269,8 @@ private:
   double startPoint_[2];
   double eps_;
   double hTotal_;
+  double cachedEdgeLength_;  // ge->length() cached after 1D mesh is available
+  bool   edgeLengthCached_;
 
   // Méthodes privées
   void    computeParameters();

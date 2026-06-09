@@ -2997,7 +2997,8 @@ std::string BoundaryCornerField::getDescription()
 BoundaryCornerField::BoundaryCornerField()
   : h1_(1e-3), ratio_(1.15), nbLayers_(30),
     nbCornerColumns_(10), delta1_(-1.0), omega_(1.0),
-    eps_(1.0), hTotal_(0.0)
+    eps_(1.0), hTotal_(0.0),
+    cachedEdgeLength_(0.0), edgeLengthCached_(false)
 {
   axisPoint_[0]  = axisPoint_[1]  = 0.0;
   startPoint_[0] = startPoint_[1] = 0.0;
@@ -3026,6 +3027,7 @@ BoundaryCornerField::BoundaryCornerField()
 
 void BoundaryCornerField::computeParameters()
 {
+  if(update_needed) edgeLengthCached_ = false;
   if(delta1_ < 0.0) delta1_ = h1_;
 
   // extract axisPoint_ and startPoint_ from their option lists
@@ -3050,7 +3052,11 @@ void BoundaryCornerField::computeParameters()
   GEdge *ge = GModel::current()->getEdgeByTag(curvesList_.front());
   if(!ge || ge->mesh_vertices.empty()) { eps_ = 1.0; return; }
 
-  double l = ge->length() /
+  if(!edgeLengthCached_) {
+    cachedEdgeLength_ = ge->length();
+    edgeLengthCached_ = true;
+  }
+  double l = cachedEdgeLength_ /
              std::max(1, (int)ge->mesh_vertices.size());
 
   eps_ = (nbCornerColumns_ > 1)

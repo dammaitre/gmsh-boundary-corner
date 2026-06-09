@@ -85,7 +85,7 @@ gmsh.model.mesh.field.setAsBackgroundMesh(bc)
 
 gmsh.option.setNumber("Mesh.BoundaryCornerField",        bc)
 gmsh.option.setNumber("Mesh.CharacteristicLengthMax",    LC_FAR)
-gmsh.option.setNumber("Mesh.CharacteristicLengthMin",    H1 * 0.5)
+gmsh.option.setNumber("Mesh.CharacteristicLengthMin",    H1)
 
 # ── Generate ──────────────────────────────────────────────────────────────────
 gmsh.model.mesh.generate(2)
