@@ -1,3 +1,13 @@
+# GMSH-BOUNDARY-CORNER
+
+Gmsh fork aimed at providing a working interface for boundary layers intersecting the y- axis at 90°. GMSH's boundary layer generation averages the two neighbooring normal vectors of each point to extend the mesh. The y- axis has its normals oriented downwards, making the BL generation crash at intersections with hard angles. 
+
+Here we create a new `class BoundaryCornerField` handling the BL rotation to critical corners and joining the BL and the axis. Boundary corners are henced awaited to be located at stagnation points: they create nice polar meshes with longitudinal geometric cell squeeshing down to the critical point.
+
+
+
+# GMSH's original readme.txt :
+
 This is Gmsh, an automatic three-dimensional finite element mesh generator with
 built-in pre- and post-processing facilities.
 
