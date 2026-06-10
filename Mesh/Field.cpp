@@ -2996,8 +2996,8 @@ std::string BoundaryCornerField::getDescription()
 
 BoundaryCornerField::BoundaryCornerField()
   : h1_(1e-3), ratio_(1.15), nbLayers_(30),
-    nbCornerColumns_(10), delta1_(-1.0), omega_(1.0),
-    eps_(1.0), hTotal_(0.0)
+    nbCornerColumns_(10), delta1_(-1.0), lBL_(-1.0), omega_(1.0),
+    eps_(1.0), lBLeff_(1e-3), hTotal_(0.0)
 {
   axisPoint_[0]  = axisPoint_[1]  = 0.0;
   startPoint_[0] = startPoint_[1] = 0.0;
@@ -3018,7 +3018,14 @@ BoundaryCornerField::BoundaryCornerField()
   options["NbCornerColumns"] = new FieldOptionInt(
     nbCornerColumns_, "Number of quad columns in the BC zone", &update_needed);
   options["Delta1"] = new FieldOptionDouble(
-    delta1_, "Length of the last BC cell along the profile (-1 = Size)",
+    delta1_,
+    "Arc-length of the first BC column at StartPoint, matching the adjacent BL "
+    "tangential cell size (l_BL).  -1 = use ColWidth",
+    &update_needed);
+  options["ColWidth"] = new FieldOptionDouble(
+    lBL_,
+    "Arc-length of the last BC column at AxisPoint (corner cell, delta_1).  "
+    "-1 = use Size (h1)",
     &update_needed);
   options["Omega"] = new FieldOptionDouble(
     omega_, "Height scale factor for BC rows (default 1.0)", &update_needed);
@@ -3026,9 +3033,10 @@ BoundaryCornerField::BoundaryCornerField()
 
 void BoundaryCornerField::computeParameters()
 {
-  if(delta1_ < 0.0) delta1_ = h1_;
+  lBLeff_ = (lBL_ > 0.0) ? lBL_ : h1_;
+  if(lBLeff_ < 1e-100) lBLeff_ = 1e-100;  // prevent div-by-zero in eps_
+  double d1eff = (delta1_ > 0.0) ? delta1_ : lBLeff_;  // resolve without mutating delta1_
 
-  // extract axisPoint_ and startPoint_ from their option lists
   {
     auto it = axisPointList_.begin();
     axisPoint_[0] = (it != axisPointList_.end()) ? *it++ : 0.0;
@@ -3045,16 +3053,10 @@ void BoundaryCornerField::computeParameters()
   else
     hTotal_ = h1_ * (std::pow(ratio_, nbLayers_) - 1.0) / (ratio_ - 1.0);
 
-  if(curvesList_.empty()) { eps_ = 1.0; return; }
-
-  GEdge *ge = GModel::current()->getEdgeByTag(curvesList_.front());
-  if(!ge || ge->mesh_vertices.empty()) { eps_ = 1.0; return; }
-
-  double l = ge->length() /
-             std::max(1, (int)ge->mesh_vertices.size());
-
+  // d1eff = first column at S (large, l_BL); lBLeff_ = last column at C (small)
+  // eps_ < 1 → compression toward the corner (C)
   eps_ = (nbCornerColumns_ > 1)
-           ? std::pow(delta1_ / l, 1.0 / (nbCornerColumns_ - 1))
+           ? std::pow(lBLeff_ / d1eff, 1.0 / (nbCornerColumns_ - 1))
            : 1.0;
 }
 
@@ -3062,8 +3064,8 @@ void BoundaryCornerField::computeParameters()
 double BoundaryCornerField::arcLengthToParam(GEdge *ge, double x, double y)
 {
   double t = 0.0;
-  SPoint3 p(x, y, 0.0);
-  ge->closestPoint(p, t);
+  const SPoint3 p(x, y, 0.0);  // const forces the virtual GPoint overload (double &param)
+  ge->closestPoint(p, t);       // t is now an output: parameter of closest point
   return t;
 }
 
@@ -3080,6 +3082,10 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
 {
   computeParameters();
   if(curvesList_.empty()) return;
+  if(nbCornerColumns_ < 1 || nbLayers_ < 1) {
+    Msg::Error("BoundaryCorner: NbCornerColumns and NbLayers must be >= 1");
+    return;
+  }
 
   GEdge *ge = gm->getEdgeByTag(curvesList_.front());
   if(!ge) return;
@@ -3096,18 +3102,40 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
 
   int N = nbCornerColumns_;
 
+  // --- Curve parameters at start and axis points ---
+  double t_start = arcLengthToParam(ge, startPoint_[0], startPoint_[1]);
+  double t_end   = arcLengthToParam(ge, axisPoint_[0],  axisPoint_[1]);
+
+  // --- Actual arc length S to C (numerical integration of |firstDer|) ---
+  double S_total = 0.0;
+  {
+    const int nInt = 200;
+    double dti = (t_end - t_start) / nInt;
+    for(int i = 0; i < nInt; i++)
+      S_total += ge->firstDer(t_start + (i + 0.5) * dti).norm() * std::abs(dti);
+  }
+  if(S_total < 1e-14) {
+    Msg::Error("BoundaryCorner: arc length from StartPoint to AxisPoint is zero");
+    return;
+  }
+
+  // --- Scale first column width so the N-column series spans exactly S_total ---
+  // eps_ (compression ratio) is preserved; only the absolute scale changes.
+  double w0 = (std::abs(eps_ - 1.0) < 1e-10)
+              ? S_total / N
+              : S_total * (1.0 - eps_) / (1.0 - std::pow(eps_, N));
+
   // --- Build profile points (N+1 nodes from startPoint to axisPoint) ---
   std::vector<SPoint2> prof(N + 1);
   prof[0] = SPoint2(startPoint_[0], startPoint_[1]);
   for(int i = 1; i < N; i++) {
-    double Li = h1_ * std::pow(eps_, i - 1);
-    double t0  = arcLengthToParam(ge, prof[i - 1].x(), prof[i - 1].y());
+    double Li    = w0 * std::pow(eps_, i - 1);
+    double t0    = arcLengthToParam(ge, prof[i - 1].x(), prof[i - 1].y());
     double speed = ge->firstDer(t0).norm();
     double dt    = (speed > 1e-14) ? Li / speed : 0.0;
-    Range<double> bounds = ge->parBounds(0);
-    double t1 = std::min(t0 + dt, bounds.high());
-    GPoint gp = ge->point(t1);
-    prof[i] = SPoint2(gp.x(), gp.y());
+    double t1    = std::min(t0 + dt, t_end);
+    GPoint gp    = ge->point(t1);
+    prof[i]      = SPoint2(gp.x(), gp.y());
   }
   prof[N] = SPoint2(axisPoint_[0], axisPoint_[1]);
 
@@ -3121,7 +3149,9 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
     SPoint2 ni = normalAtPoint(ge, ti);
     for(int k = 0; k <= nbLayers_; k++) {
       double hk = (k == 0) ? 0.0
-                : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
+                : (std::abs(ratio_ - 1.0) < 1e-10)
+                    ? h1_ * omega_ * k
+                    : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
       double x = prof[i].x() + ni.x() * hk;
       double y = prof[i].y() + ni.y() * hk;
       MVertex *v = new MVertex(x, y, 0.0, gf);
@@ -3129,44 +3159,6 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
       grid[i][k] = v;
     }
   }
-
-  // --- Remove triangles whose centroid falls inside the corner zone ---
-  // Zone: x in [xMin,xMax], y in [yMin, yMin + hTotal_*(1+tol)]
-  double xMin = std::min(startPoint_[0], axisPoint_[0]);
-  double xMax = std::max(startPoint_[0], axisPoint_[0]);
-  double yMin = std::min(startPoint_[1], axisPoint_[1]);
-  double yMax = yMin + hTotal_ * 1.05;
-
-  std::vector<MTriangle *> keep;
-  for(auto *tri : gf->triangles) {
-    double cx = (tri->getVertex(0)->x() + tri->getVertex(1)->x() +
-                 tri->getVertex(2)->x()) / 3.0;
-    double cy = (tri->getVertex(0)->y() + tri->getVertex(1)->y() +
-                 tri->getVertex(2)->y()) / 3.0;
-    if(cx >= xMin && cx <= xMax && cy >= yMin && cy <= yMax)
-      delete tri;
-    else
-      keep.push_back(tri);
-  }
-  gf->triangles = keep;
-
-  // Purge vertices no longer referenced by any element
-  std::set<MVertex *> used;
-  for(auto *t : gf->triangles)
-    for(int j = 0; j < 3; j++) used.insert(t->getVertex(j));
-  for(auto *q : gf->quadrangles)
-    for(int j = 0; j < 4; j++) used.insert(q->getVertex(j));
-  // grid vertices will be inserted below — add them too
-  for(int i = 0; i <= N; i++)
-    for(int k = 0; k <= nbLayers_; k++)
-      used.insert(grid[i][k]);
-
-  std::vector<MVertex *> keptVerts;
-  for(auto *v : gf->mesh_vertices) {
-    if(used.count(v)) keptVerts.push_back(v);
-    else delete v;
-  }
-  gf->mesh_vertices = keptVerts;
 
   // --- Insert structured quads ---
   for(int i = 0; i < N; i++) {
@@ -3177,30 +3169,76 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
     }
   }
 
-  // --- SNAP: merge fringe triangle vertices onto the quad boundary ---
-  // Build a set of all grid vertices (to skip them in the snap loop)
+  // --- Exact polygon boundary of the quad block (CCW) ---
+  // The rectangular zone was wrong: the block follows curved normals and can
+  // reach y ~ 1 near startPoint while the old rectangle only covered y < hTotal_.
+  std::vector<SPoint2> blockPoly;
+  for(int k = 0; k <= nbLayers_; k++)      // left side: profile → outer
+    blockPoly.push_back(SPoint2(grid[0][k]->x(), grid[0][k]->y()));
+  for(int i = 1; i <= N; i++)              // outer boundary: left → right
+    blockPoly.push_back(SPoint2(grid[i][nbLayers_]->x(), grid[i][nbLayers_]->y()));
+  for(int k = nbLayers_ - 1; k >= 0; k--) // right side: outer → profile
+    blockPoly.push_back(SPoint2(grid[N][k]->x(), grid[N][k]->y()));
+  for(int i = N - 1; i >= 1; i--)         // profile: right → left (closes polygon)
+    blockPoly.push_back(SPoint2(grid[i][0]->x(), grid[i][0]->y()));
+
+  auto inPoly = [&](double px, double py) -> bool {
+    bool inside = false;
+    int np = (int)blockPoly.size();
+    for(int a = 0, b = np - 1; a < np; b = a++) {
+      double xa = blockPoly[a].x(), ya = blockPoly[a].y();
+      double xb = blockPoly[b].x(), yb = blockPoly[b].y();
+      if(((ya > py) != (yb > py)) &&
+         (px < (xb - xa) * (py - ya) / (yb - ya) + xa))
+        inside = !inside;
+    }
+    return inside;
+  };
+
+  // --- Delete triangles inside the quad block; track their vertices ---
+  std::set<MVertex *> deletedVSet;
+  {
+    std::vector<MTriangle *> keep;
+    for(auto *tri : gf->triangles) {
+      double cx = (tri->getVertex(0)->x() + tri->getVertex(1)->x() +
+                   tri->getVertex(2)->x()) / 3.0;
+      double cy = (tri->getVertex(0)->y() + tri->getVertex(1)->y() +
+                   tri->getVertex(2)->y()) / 3.0;
+      if(inPoly(cx, cy)) {
+        for(int j = 0; j < 3; j++) deletedVSet.insert(tri->getVertex(j));
+        delete tri;
+      } else {
+        keep.push_back(tri);
+      }
+    }
+    gf->triangles = keep;
+  }
+
+  // --- Build grid vertex set and outer quad boundary for snapping ---
   std::set<MVertex *> gridSet;
   for(int i = 0; i <= N; i++)
     for(int k = 0; k <= nbLayers_; k++)
       gridSet.insert(grid[i][k]);
 
-  // Quad boundary facing the triangles: top row + side columns (k=1..nbLayers_-1)
   std::vector<MVertex *> qBdry;
   for(int i = 0; i <= N; i++)        qBdry.push_back(grid[i][nbLayers_]);
   for(int k = 1; k < nbLayers_; k++) qBdry.push_back(grid[0][k]);
   for(int k = 1; k < nbLayers_; k++) qBdry.push_back(grid[N][k]);
 
-  // For each non-grid vertex inside the deletion zone, snap to nearest boundary vertex
+  // --- Snap fringe vertices to nearest quad boundary vertex ---
+  // A fringe vertex belongs to at least one deleted triangle AND one surviving triangle.
+  // These are the only vertices that need to move; all others are either inside
+  // (purged) or outside (untouched).
+  std::set<MVertex *> survivingVSet;
+  for(auto *tri : gf->triangles)
+    for(int j = 0; j < 3; j++) survivingVSet.insert(tri->getVertex(j));
+
   std::map<MVertex *, MVertex *> snapMap;
-  for(std::vector<MVertex *>::iterator it = gf->mesh_vertices.begin();
-      it != gf->mesh_vertices.end(); ++it) {
-    MVertex *v = *it;
-    if(gridSet.count(v)) continue;
-    if(v->x() < xMin || v->x() > xMax || v->y() < yMin || v->y() > yMax) continue;
+  for(MVertex *v : deletedVSet) {
+    if(!survivingVSet.count(v) || gridSet.count(v)) continue;
     double bestD2 = 1e30;
     MVertex *bestQ = nullptr;
-    for(std::vector<MVertex *>::iterator jt = qBdry.begin(); jt != qBdry.end(); ++jt) {
-      MVertex *q = *jt;
+    for(MVertex *q : qBdry) {
       double dx = v->x() - q->x(), dy = v->y() - q->y();
       double d2 = dx * dx + dy * dy;
       if(d2 < bestD2) { bestD2 = d2; bestQ = q; }
@@ -3208,22 +3246,17 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
     if(bestQ) snapMap[v] = bestQ;
   }
 
-  // Replace references in triangles
-  for(std::vector<MTriangle *>::iterator it = gf->triangles.begin();
-      it != gf->triangles.end(); ++it) {
-    MTriangle *tri = *it;
+  // Apply snap
+  for(auto *tri : gf->triangles)
     for(int j = 0; j < 3; j++) {
-      std::map<MVertex *, MVertex *>::iterator sm = snapMap.find(tri->getVertex(j));
+      auto sm = snapMap.find(tri->getVertex(j));
       if(sm != snapMap.end()) tri->setVertex(j, sm->second);
     }
-  }
 
   // Remove degenerate triangles (snapping can merge two vertices of the same triangle)
   {
     std::vector<MTriangle *> validTri;
-    for(std::vector<MTriangle *>::iterator it = gf->triangles.begin();
-        it != gf->triangles.end(); ++it) {
-      MTriangle *tri = *it;
+    for(auto *tri : gf->triangles) {
       MVertex *a = tri->getVertex(0), *b = tri->getVertex(1), *c = tri->getVertex(2);
       if(a == b || b == c || a == c) delete tri;
       else validTri.push_back(tri);
@@ -3231,17 +3264,17 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
     gf->triangles = validTri;
   }
 
-  // Purge replaced vertices from gf->mesh_vertices
+  // --- Final vertex purge: remove snapped-away and orphaned vertices ---
   {
-    std::set<MVertex *> replaced;
-    for(std::map<MVertex *, MVertex *>::iterator it = snapMap.begin();
-        it != snapMap.end(); ++it)
-      replaced.insert(it->first);
+    std::set<MVertex *> keep;
+    for(auto *t : gf->triangles)
+      for(int j = 0; j < 3; j++) keep.insert(t->getVertex(j));
+    for(auto *q : gf->quadrangles)
+      for(int j = 0; j < 4; j++) keep.insert(q->getVertex(j));
     std::vector<MVertex *> finalV;
-    for(std::vector<MVertex *>::iterator it = gf->mesh_vertices.begin();
-        it != gf->mesh_vertices.end(); ++it) {
-      if(replaced.count(*it)) delete *it;
-      else finalV.push_back(*it);
+    for(auto *v : gf->mesh_vertices) {
+      if(keep.count(v)) finalV.push_back(v);
+      else delete v;
     }
     gf->mesh_vertices = finalV;
   }
@@ -3254,12 +3287,14 @@ double BoundaryCornerField::operator()(double x, double y, double z,
                                        GEntity *ge)
 {
   computeParameters();
+  double d1eff = (delta1_ > 0.0) ? delta1_ : lBLeff_;
   double dx   = x - axisPoint_[0];
   double dy   = y - axisPoint_[1];
   double dist = std::sqrt(dx * dx + dy * dy);
   double zone = hTotal_ * 5.0;
-  if(dist < zone)
-    return delta1_ + (h1_ - delta1_) * dist / zone;
+  // at C (dist=0): corner cell = lBLeff_ (small); at zone edge: l_BL = d1eff (large)
+  if(zone > 0.0 && dist < zone)
+    return lBLeff_ + (d1eff - lBLeff_) * dist / zone;
   return 1e22;
 }
 
