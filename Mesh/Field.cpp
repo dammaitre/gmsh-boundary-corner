@@ -3179,18 +3179,7 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
     }
   }
 
-  // --- Insert structured quads ---
-  for(int i = 0; i < N; i++) {
-    for(int k = 0; k < nbLayers_; k++) {
-      gf->quadrangles.push_back(new MQuadrangle(
-        grid[i][k],     grid[i + 1][k],
-        grid[i + 1][k + 1], grid[i][k + 1]));
-    }
-  }
-
   // --- Exact polygon boundary of the quad block (CCW) ---
-  // The rectangular zone was wrong: the block follows curved normals and can
-  // reach y ~ 1 near startPoint while the old rectangle only covered y < hTotal_.
   std::vector<SPoint2> blockPoly;
   for(int k = 0; k <= nbLayers_; k++)      // left side: profile → outer
     blockPoly.push_back(SPoint2(grid[0][k]->x(), grid[0][k]->y()));
@@ -3233,21 +3222,71 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
     gf->triangles = keep;
   }
 
+  // --- Delete pre-existing quads inside the BC block (BL fan quads in the BC zone) ---
+  // The BL algorithm generates fan quads at the arc_bl endpoint that span into the
+  // BC zone. Only delete quads whose centroid is inside blockPoly; fan quads that
+  // straddle the left boundary (centroid in the BL zone) are kept — they fill the
+  // visual column at the BL/BC junction.
+  {
+    std::vector<MQuadrangle *> keepQ;
+    for(auto *q : gf->quadrangles) {
+      double cx = (q->getVertex(0)->x() + q->getVertex(1)->x() +
+                   q->getVertex(2)->x() + q->getVertex(3)->x()) / 4.0;
+      double cy = (q->getVertex(0)->y() + q->getVertex(1)->y() +
+                   q->getVertex(2)->y() + q->getVertex(3)->y()) / 4.0;
+      if(inPoly(cx, cy)) {
+        for(int j = 0; j < 4; j++) deletedVSet.insert(q->getVertex(j));
+        delete q;
+      } else {
+        keepQ.push_back(q);
+      }
+    }
+    gf->quadrangles = keepQ;
+  }
+
+  // --- Merge grid[0][k] with BL outer vertices at StartPoint (conforming interface) ---
+  // The BL last column's right-side outer vertices are at the same positions as
+  // grid[0][1..nbLayers_]. Reusing those vertex objects makes the BL/BC interface
+  // conforming. BL outer vertices may be on a BL-outer GEdge (dim=1), not the GFace,
+  // so we search ALL quad vertices (no entity filter) with a loose tolerance.
+  {
+    const double tol2 = h1_ * h1_ * 0.01;  // (0.1 * h1)^2 — BL/BC positions differ by ~0.0003
+    for(int k = 1; k <= nbLayers_; k++) {
+      MVertex *gv = grid[0][k];
+      double bestD2 = 1e30; MVertex *bestV = nullptr;
+      for(auto *q : gf->quadrangles) {
+        for(int j = 0; j < 4; j++) {
+          MVertex *v = q->getVertex(j);
+          if(v->onWhat() && v->onWhat()->dim() == 0) continue;  // skip model vertices
+          double dx = v->x() - gv->x(), dy = v->y() - gv->y();
+          double d2 = dx*dx + dy*dy;
+          if(d2 < bestD2) { bestD2 = d2; bestV = v; }
+        }
+      }
+      if(bestD2 < tol2) grid[0][k] = bestV;
+    }
+  }
+
   // --- Build grid vertex set and outer quad boundary for snapping ---
   std::set<MVertex *> gridSet;
   for(int i = 0; i <= N; i++)
     for(int k = 0; k <= nbLayers_; k++)
       gridSet.insert(grid[i][k]);
 
+  // qBdry = entire outer boundary of BC block: top edge + left column + right column.
+  // The left column (grid[0][k]) is exactly where the BL right-column nodes should
+  // land, so including it here makes the snap conform the BL/BC interface.
   std::vector<MVertex *> qBdry;
   for(int i = 0; i <= N; i++)        qBdry.push_back(grid[i][nbLayers_]);
-  for(int k = 1; k < nbLayers_; k++) qBdry.push_back(grid[0][k]);
+  for(int k = 0; k < nbLayers_; k++) qBdry.push_back(grid[0][k]);  // k=0 catches BL base node at StartPoint
   for(int k = 1; k < nbLayers_; k++) qBdry.push_back(grid[N][k]);
 
-  // --- Snap fringe vertices to nearest quad boundary vertex ---
-  // A fringe vertex belongs to at least one deleted triangle AND one surviving triangle.
-  // These are the only vertices that need to move; all others are either inside
-  // (purged) or outside (untouched).
+  // --- Snap triangle fringe vertices to nearest quad boundary vertex ---
+  // A fringe vertex belongs to at least one deleted element AND one surviving triangle.
+  // Boundary nodes (dim < 2) stay on their geometric entity and are never moved.
+  // Note: surviving BL quad vertices are intentionally excluded — the BL zone ends
+  // at its last arc_bl node (~0.05 units before StartPoint), so snapping those nodes
+  // to the BC left column would bridge an unbridgeable gap and invert quads.
   std::set<MVertex *> survivingVSet;
   for(auto *tri : gf->triangles)
     for(int j = 0; j < 3; j++) survivingVSet.insert(tri->getVertex(j));
@@ -3255,6 +3294,7 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
   std::map<MVertex *, MVertex *> snapMap;
   for(MVertex *v : deletedVSet) {
     if(!survivingVSet.count(v) || gridSet.count(v)) continue;
+    if(v->onWhat() && v->onWhat()->dim() < 2) continue;
     double bestD2 = 1e30;
     MVertex *bestQ = nullptr;
     for(MVertex *q : qBdry) {
@@ -3262,10 +3302,15 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
       double d2 = dx * dx + dy * dy;
       if(d2 < bestD2) { bestD2 = d2; bestQ = q; }
     }
-    if(bestQ) snapMap[v] = bestQ;
+    if(bestQ) {
+      snapMap[v] = bestQ;
+      fprintf(stderr, "DEBUG snap (%.4f,%.4f) -> (%.4f,%.4f) dist=%.4f\n",
+              v->x(), v->y(), bestQ->x(), bestQ->y(), sqrt(bestD2));
+    }
   }
+  fprintf(stderr, "DEBUG snap: %d vertices snapped\n", (int)snapMap.size());
 
-  // Apply snap
+  // Apply snap to surviving triangles
   for(auto *tri : gf->triangles)
     for(int j = 0; j < 3; j++) {
       auto sm = snapMap.find(tri->getVertex(j));
@@ -3281,6 +3326,15 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
       else validTri.push_back(tri);
     }
     gf->triangles = validTri;
+  }
+
+  // --- Insert BC structured quads (after cleanup so blockPoly is already correct) ---
+  for(int i = 0; i < N; i++) {
+    for(int k = 0; k < nbLayers_; k++) {
+      gf->quadrangles.push_back(new MQuadrangle(
+        grid[i][k],     grid[i + 1][k],
+        grid[i + 1][k + 1], grid[i][k + 1]));
+    }
   }
 
   // --- Final vertex purge: remove snapped-away and orphaned vertices ---
