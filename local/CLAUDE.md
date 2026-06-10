@@ -6,13 +6,6 @@
 
 ## Key geometry
 
-```
-         S ────────────── C=(x_C, 0) ──────── axis y=0
-         |   n_BC columns  |
-profile  |   n_BL layers   |
-   P     |                 |
-```
-
 - **S** = StartPoint: on the profile, where BL ends and BC begins. Adjacent BL tangential cell size = l_BL.
 - **C** = AxisPoint: where P meets y=0 at 90°. Last quad column sits on the axis.
 - **Columns** run along the arc S→C (arc-length compression, decreasing widths).
@@ -124,3 +117,4 @@ mmg3d disabled: pre-existing linker bug in bundled v4.0, unrelated to this work.
 
 - **Non-conforming interface**: quad outer boundary nodes do not generally coincide with surrounding triangle nodes. The fringe snap is a heuristic. Proper fix: enforce quad boundary edges as Delaunay constraints, or pre-declare embedded edges before `meshGFace()`.
 - `buildCornerColumns` only processes `curvesList_.front()` (first curve). Multi-curve support not implemented.
+- **interface gap**: There is currently a column gap in interfaces between BLs & BCs.
