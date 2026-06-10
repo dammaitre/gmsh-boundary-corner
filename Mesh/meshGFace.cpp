@@ -37,6 +37,7 @@
 #include "Context.h"
 #include "boundaryLayersData.h"
 #include "filterElements.h"
+#include "Field.h"
 
 // define this to use the old initial delaunay
 #define OLD_CODE_DELAUNAY 1
@@ -1023,6 +1024,104 @@ static void modifyInitialMeshForBoundaryLayers(
   meshGenerator(gf, 0, 0, true, false, &hop);
 }
 
+// Analog of modifyInitialMeshForBoundaryLayers for BoundaryCornerField.
+// Must be called AFTER modifyInitialMeshForBoundaryLayers so that blQuads/
+// blVerts are already known.  Uses the same XOR edge-tracking trick to build
+// the boundary of the "remaining to triangulate" region, then re-runs
+// meshGenerator with the BC outer boundary as a hard constraint — identical
+// to the BL approach.
+static void modifyInitialMeshForBoundaryCorners(
+  GFace *gf,
+  const std::vector<MQuadrangle *> &blQuads,
+  const std::set<MVertex *> &blVerts,
+  std::vector<MQuadrangle *> &bcQuads,
+  std::set<MVertex *> &verts)
+{
+  FieldManager *fields = gf->model()->getFields();
+  std::vector<MLine *> outerLines;
+
+  bool anyApplied = false;
+  for(auto it = fields->begin(); it != fields->end(); ++it) {
+    BoundaryCornerField *bcf =
+      dynamic_cast<BoundaryCornerField *>(it->second);
+    if(!bcf) continue;
+    if(bcf->buildForFace(gf, blQuads, blVerts, bcQuads, verts, outerLines))
+      anyApplied = true;
+  }
+  if(!anyApplied || outerLines.empty()) {
+    for(auto *l : outerLines) delete l;
+    return;
+  }
+
+  std::set<MEdge, Less_Edge> bedges, removed;
+
+  std::vector<GEdge *> domEdges = gf->edges();
+  for(auto *ge : domEdges)
+    for(auto *ml : ge->lines)
+      addOrRemove(ml->getVertex(0), ml->getVertex(1), bedges, removed);
+
+  for(auto *q : blQuads)
+    for(int j = 0; j < 4; j++)
+      addOrRemove(q->getVertex(j), q->getVertex((j + 1) % 4), bedges, removed);
+
+  for(auto *q : bcQuads)
+    for(int j = 0; j < 4; j++)
+      addOrRemove(q->getVertex(j), q->getVertex((j + 1) % 4), bedges, removed);
+  if(domEdges.empty()) {
+    Msg::Warning("BoundaryCorner: face %d has no boundary edges", gf->tag());
+    for(auto *l : outerLines) delete l;
+    return;
+  }
+
+  discreteEdge ne(gf->model(), 444445, nullptr, (*domEdges.begin())->getEndVertex());
+  for(auto &e : bedges)
+    ne.lines.push_back(new MLine(e.getVertex(0), e.getVertex(1)));
+
+  std::vector<GEdge *> hop;
+  hop.push_back(&ne);
+
+  // BL outer vertices (MFaceVertex with onWhat()==gf) are in gf->mesh_vertices
+  // after the BL inner mesher.  deMeshGFace calls GFace::deleteMesh() which
+  // deletes every entry in gf->mesh_vertices — that would free these vertices
+  // while ne.lines still holds raw pointers to them (use-after-free crash).
+  // Fix: remove them from gf->mesh_vertices before deMeshGFace so they survive.
+  // BC outer vertices (plain MVertex, onWhat()==gf) are NOT yet in
+  // gf->mesh_vertices at this point, so the filter is a no-op for them.
+  std::set<MVertex *> protected_verts;
+  for(auto *l : ne.lines) {
+    for(int j = 0; j < 2; j++) {
+      MVertex *v = l->getVertex(j);
+      if(v->onWhat() == gf) protected_verts.insert(v);
+    }
+  }
+  {
+    auto &mv = gf->mesh_vertices;
+    mv.erase(std::remove_if(mv.begin(), mv.end(),
+      [&protected_verts](MVertex *v){ return protected_verts.count(v) > 0; }),
+      mv.end());
+  }
+
+  deMeshGFace kil;
+  kil(gf);
+  meshGenerator(gf, 0, 0, true, false, &hop);
+
+  // After the inner mesher, _deleteUnusedVertices has re-added protected_verts
+  // to gf->mesh_vertices (they appear on the boundary of the triangulated
+  // region).  Remove them now so the outer meshGenerator re-inserts them
+  // cleanly via verts (BL outer) and bcVerts (BC outer/inner) without
+  // creating duplicates that would cause a double-free at cleanup.
+  {
+    auto &mv = gf->mesh_vertices;
+    mv.erase(std::remove_if(mv.begin(), mv.end(),
+      [&protected_verts](MVertex *v){ return protected_verts.count(v) > 0; }),
+      mv.end());
+  }
+
+  // Clean up temporary MLine objects owned by ne
+  for(auto *l : ne.lines) delete l;
+  ne.lines.clear();
+}
+
 static bool improved_translate(GFace *gf, MVertex *vertex, SVector3 &v1,
                                SVector3 &v2)
 {
@@ -1294,6 +1393,7 @@ bool meshGenerator(GFace *gf, int RECUR_ITER, bool repairSelfIntersecting1dMesh,
       it != all_vertices.end(); it++) {
     MVertex *here = *it;
     GEntity *ge = here->onWhat();
+    if(!ge) continue;
     SPoint2 param;
     reparamMeshVertexOnFace(here, gf, param);
     BDS_Point *pp = m->add_point(count, param[0], param[1], gf);
@@ -1706,6 +1806,8 @@ bool meshGenerator(GFace *gf, int RECUR_ITER, bool repairSelfIntersecting1dMesh,
   std::vector<MQuadrangle *> blQuads;
   std::vector<MTriangle *> blTris;
   std::set<MVertex *> verts;
+  std::vector<MQuadrangle *> bcQuads;
+  std::set<MVertex *> bcVerts;
 
   bool infty = false;
   if(gf->getMeshingAlgo() == ALGO_2D_FRONTAL_QUAD) {
@@ -1721,6 +1823,9 @@ bool meshGenerator(GFace *gf, int RECUR_ITER, bool repairSelfIntersecting1dMesh,
 
   if(!onlyInitialMesh)
     modifyInitialMeshForBoundaryLayers(gf, blQuads, blTris, verts, debug);
+
+  if(!onlyInitialMesh)
+    modifyInitialMeshForBoundaryCorners(gf, blQuads, verts, bcQuads, bcVerts);
 
   // the delaunay algo is based directly on internal gmsh structures BDS mesh is
   // passed in order not to recompute local coordinates of vertices
@@ -1766,6 +1871,11 @@ bool meshGenerator(GFace *gf, int RECUR_ITER, bool repairSelfIntersecting1dMesh,
   gf->triangles.insert(gf->triangles.begin(), blTris.begin(), blTris.end());
   gf->mesh_vertices.insert(gf->mesh_vertices.begin(), verts.begin(),
                            verts.end());
+  // BC quads: outer BC nodes are already in gf->mesh_vertices (placed by the
+  // meshGenerator re-triangulation); only inner nodes need explicit insertion.
+  gf->quadrangles.insert(gf->quadrangles.end(), bcQuads.begin(), bcQuads.end());
+  gf->mesh_vertices.insert(gf->mesh_vertices.end(), bcVerts.begin(),
+                           bcVerts.end());
 
   splitElementsInBoundaryLayerIfNeeded(gf);
 

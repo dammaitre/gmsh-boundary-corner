@@ -542,16 +542,8 @@ static void Mesh2D(GModel *m)
     }
   }
 
-  // Post-process: inject BoundaryCorner structured quad columns
-  // Called after face meshing so that mesh_vertices are available and
-  // the injected quads cannot be erased by meshGenerator's deleteMesh.
-  if(CTX::instance()->mesh.boundaryCornerField > 0) {
-    FieldManager *fields = m->getFields();
-    for(auto &[tag, field] : *fields) {
-      BoundaryCornerField *bc = dynamic_cast<BoundaryCornerField *>(field);
-      if(bc) bc->buildCornerColumns(m);
-    }
-  }
+  // BoundaryCorner quad columns are now injected during face meshing inside
+  // meshGFace.cpp (modifyInitialMeshForBoundaryCorners), analogous to BL.
 
   Msg::SetNumThreads(prevNumThreads);
 

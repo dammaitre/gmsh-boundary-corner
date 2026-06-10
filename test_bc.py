@@ -133,7 +133,24 @@ gmsh.write(out)
 print(f"\nwritten: {out}")
 
 if gui:
-    gmsh_bin = os.path.join(_root, "build", "gmsh")
+    # Prefer the dev build; fall back to the system gmsh if the dev build
+    # has no FLTK GUI support (libfltk1.3-dev not installed).
+    dev_bin = os.path.join(_root, "build", "gmsh")
+    import shutil
+    gmsh_bin = dev_bin if shutil.which(dev_bin) else "gmsh"
+    # Quick check: if the dev binary has no FLTK, it exits immediately.
+    # Detect by checking whether FLTK is listed in its cmake features.
+    import subprocess as _sp
+    cache = os.path.join(_root, "build", "CMakeCache.txt")
+    has_fltk = False
+    if os.path.exists(cache):
+        with open(cache) as _f:
+            for _line in _f:
+                if "FLTK_BASE_LIBRARY_RELEASE:FILEPATH=" in _line and "NOTFOUND" not in _line:
+                    has_fltk = True
+                    break
+    if not has_fltk:
+        gmsh_bin = shutil.which("gmsh") or dev_bin
     subprocess.run([gmsh_bin, out])
 
 gmsh.finalize()

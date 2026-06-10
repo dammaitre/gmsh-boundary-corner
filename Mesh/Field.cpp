@@ -33,6 +33,7 @@
 #include "MVertex.h"
 #include "MTriangle.h"
 #include "MQuadrangle.h"
+#include "MLine.h"
 #include "automaticMeshSizeField.h"
 #include "nanoflann.hpp"
 #include "meshGFaceDelaunayInsertion.h"
@@ -3069,6 +3070,119 @@ SPoint2 BoundaryCornerField::normalAtPoint(GEdge *ge, double t)
   double len = d.norm();
   if(len < 1e-14) return SPoint2(0.0, 1.0);
   return SPoint2(-d.y() / len, d.x() / len);
+}
+
+bool BoundaryCornerField::buildForFace(
+  GFace *gf,
+  const std::vector<MQuadrangle *> &blQuads,
+  const std::set<MVertex *> &blVerts,
+  std::vector<MQuadrangle *> &bcQuads,
+  std::set<MVertex *> &verts,
+  std::vector<MLine *> &outerLines)
+{
+  computeParameters();
+  if(curvesList_.empty() || nbLayers_ < 1) return false;
+
+  // Resolve GEdge and check it belongs to gf
+  GEdge *ge = nullptr;
+  for(int tag : curvesList_) {
+    GEdge *e = gf->model()->getEdgeByTag(tag);
+    if(!e) continue;
+    for(auto *fe : gf->edges()) if(fe == e) { ge = e; break; }
+    if(ge) break;
+  }
+  if(!ge) return false;
+
+  std::vector<MVertex *> baseVerts;
+  if(ge->getBeginVertex() && !ge->getBeginVertex()->mesh_vertices.empty())
+    baseVerts.push_back(ge->getBeginVertex()->mesh_vertices[0]);
+  for(auto *v : ge->mesh_vertices) baseVerts.push_back(v);
+  if(ge->getEndVertex() && !ge->getEndVertex()->mesh_vertices.empty())
+    baseVerts.push_back(ge->getEndVertex()->mesh_vertices[0]);
+  if((int)baseVerts.size() < 2) {
+    Msg::Error("BoundaryCorner: GEdge %d has no 1D mesh yet", ge->tag());
+    return false;
+  }
+
+  // Ensure baseVerts runs from startPoint→axisPoint; reverse if necessary.
+  // Use squared distance to identify which end is which.
+  auto sqDist = [](MVertex *v, double x, double y) {
+    double dx = v->x() - x, dy = v->y() - y;
+    return dx*dx + dy*dy;
+  };
+  MVertex *vFront = baseVerts.front(), *vBack = baseVerts.back();
+  double dFrontS = sqDist(vFront, startPoint_[0], startPoint_[1]);
+  double dBackS  = sqDist(vBack,  startPoint_[0], startPoint_[1]);
+  if(dBackS < dFrontS)
+    std::reverse(baseVerts.begin(), baseVerts.end());
+
+  // Detect how many leading arc_bc segments are consumed by BL.
+  // When BL builds a fan at p_start, it may use arc_bc vertices (baseVerts[i])
+  // as outer-row (j=2 or j=3) vertices in BL quads.  Such segments are XOR-
+  // cancelled by BL and BC must skip them.
+  int bcStart = 0;
+  {
+    std::set<MVertex*> blOuterVerts;
+    for(auto *q : blQuads)
+      for(int j = 2; j <= 3; j++) blOuterVerts.insert(q->getVertex(j));
+    // Walk from baseVerts[1] forward; find the LAST baseVerts[i] that is in blOuterVerts.
+    // bcStart = that index (all segments 0..i-1 were consumed).
+    for(int i = 1; i < (int)baseVerts.size(); i++) {
+      if(blOuterVerts.count(baseVerts[i])) {
+        bcStart = i;
+      } else break;  // stop at first non-consumed vertex
+    }
+  }
+
+  // Exclude the very last column at the axis/nose endpoint.  At that point the
+  // outward normal is parallel to the axis, so BC outer vertices land exactly on
+  // the axis line (y=0).  Those collinear vertices sit between p_nose and the
+  // adjacent l_ax mesh vertex, preventing constrained-Delaunay edge recovery.
+  // Skipping the last column leaves a short arc_bc segment near the nose that
+  // the inner mesher's Delaunay will fill with a small triangle.
+  int N = (int)baseVerts.size() - 2 - bcStart;  // BC columns (segments not consumed by BL)
+  if(N < 1) {
+    Msg::Warning("BoundaryCorner: no arc_bc segments remain after BL fan for GEdge %d", ge->tag());
+    return false;
+  }
+
+  // Build grid[i][k]: i indexes columns starting from baseVerts[bcStart].
+  std::vector<std::vector<MVertex *>> grid(N + 1,
+    std::vector<MVertex *>(nbLayers_ + 1, nullptr));
+
+  for(int i = 0; i <= N; i++) {
+    MVertex *bv = baseVerts[bcStart + i];
+    grid[i][0] = bv;
+    double ti = arcLengthToParam(ge, bv->x(), bv->y());
+    SPoint2 ni = normalAtPoint(ge, ti);
+    double bx = bv->x(), by = bv->y();
+    for(int k = 1; k <= nbLayers_; k++) {
+      double hk = (std::abs(ratio_ - 1.0) < 1e-10)
+                  ? h1_ * omega_ * k
+                  : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
+      grid[i][k] = new MVertex(bx + ni.x() * hk, by + ni.y() * hk, 0.0, gf);
+    }
+  }
+  // Collect inner BC vertices (k=1..nbLayers_-1) that are not BL outer vertices.
+  // Outer BC vertices (k=nbLayers_) reach gf->mesh_vertices via meshGenerator.
+  for(int i = 0; i <= N; i++)
+    for(int k = 1; k <= nbLayers_; k++)
+      if(!blVerts.count(grid[i][k])) verts.insert(grid[i][k]);
+
+  // Outer boundary MLines (k = nbLayers_ row, used as re-triangulation constraint)
+  for(int i = 0; i < N; i++)
+    outerLines.push_back(new MLine(grid[i][nbLayers_], grid[i + 1][nbLayers_]));
+
+  // BC structured quads
+  for(int i = 0; i < N; i++)
+    for(int k = 0; k < nbLayers_; k++)
+      bcQuads.push_back(new MQuadrangle(
+        grid[i][k],         grid[i + 1][k],
+        grid[i + 1][k + 1], grid[i][k + 1]));
+
+  Msg::Info("BoundaryCorner (pre-mesh): %d columns × %d layers = %d quads (face %d)",
+            N, nbLayers_, N * nbLayers_, gf->tag());
+  return true;
 }
 
 void BoundaryCornerField::buildCornerColumns(GModel *gm)

@@ -8,6 +8,7 @@
 
 #include <string>
 #include <map>
+#include <set>
 #include <vector>
 #include <list>
 #include "GmshConfig.h"
@@ -239,6 +240,9 @@ class GModel;
 class GEdge;
 class GFace;
 class SPoint2;
+class MLine;
+class MQuadrangle;
+class MVertex;
 
 class BoundaryCornerField : public Field {
 public:
@@ -250,7 +254,19 @@ public:
   const char *getName() override { return "BoundaryCorner"; }
   std::string getDescription() override;
 
-  void buildCornerColumns(GModel *gm);
+  void buildCornerColumns(GModel *gm);  // legacy post-mesh entry (kept for reference)
+
+  // Pre-mesh: compute BC geometry for GFace gf.
+  // Fills bcQuads (structured quads), verts (all interior+outer BC nodes not
+  // on boundary curves), and outerLines (MLine segments along the outer BC
+  // boundary, i.e. k=nbLayers_ row).  Does NOT touch gf->triangles.
+  // Returns true if this field applies to gf.
+  bool buildForFace(GFace *gf,
+                    const std::vector<MQuadrangle *> &blQuads,
+                    const std::set<MVertex *> &blVerts,
+                    std::vector<MQuadrangle *> &bcQuads,
+                    std::set<MVertex *> &verts,
+                    std::vector<MLine *> &outerLines);
 
 private:
   // Options exposées via FieldOption*
