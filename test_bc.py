@@ -20,8 +20,9 @@ Run:  python test_bc.py           # headless
 
 import sys, os, math, subprocess
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "api"))
-os.environ["GMSH_LIB"] = os.path.join(os.path.dirname(__file__), "build", "libgmsh.so")
+_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_root, "api"))
+os.environ["GMSH_LIB"] = os.path.join(_root, "build", "libgmsh.so")
 
 import gmsh
 
@@ -47,7 +48,7 @@ N_LAY  = 6       # number of BL layers
 W0_MAX = LC_BODY  # max BC column arc-length (at S); N columns derived automatically
 
 gui = "--gui" in sys.argv
-gmsh.initialize(["gmsh"] if gui else ["gmsh", "-nopopup"])
+gmsh.initialize(["gmsh", "-nopopup"])
 gmsh.model.add("test_bc_ellipse")
 
 # ── Points ────────────────────────────────────────────────────────────────────
@@ -132,6 +133,7 @@ gmsh.write(out)
 print(f"\nwritten: {out}")
 
 if gui:
-    subprocess.run(["/usr/bin/gmsh", out])
+    gmsh_bin = os.path.join(_root, "build", "gmsh")
+    subprocess.run([gmsh_bin, out])
 
 gmsh.finalize()
