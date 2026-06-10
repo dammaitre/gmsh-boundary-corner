@@ -35,6 +35,7 @@
 #include "MQuadrangle.h"
 #include "automaticMeshSizeField.h"
 #include "nanoflann.hpp"
+#include "meshGFaceDelaunayInsertion.h"
 
 #if defined(HAVE_POST)
 #include "PView.h"
@@ -3267,77 +3268,99 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
     }
   }
 
-  // --- Build grid vertex set and outer quad boundary for snapping ---
-  std::set<MVertex *> gridSet;
-  for(int i = 0; i <= N; i++)
-    for(int k = 0; k <= nbLayers_; k++)
-      gridSet.insert(grid[i][k]);
-
-  // qBdry = entire outer boundary of BC block: top edge + left column + right column.
-  // The left column (grid[0][k]) is exactly where the BL right-column nodes should
-  // land, so including it here makes the snap conform the BL/BC interface.
-  std::vector<MVertex *> qBdry;
-  for(int i = 0; i <= N; i++)        qBdry.push_back(grid[i][nbLayers_]);
-  for(int k = 0; k < nbLayers_; k++) qBdry.push_back(grid[0][k]);  // k=0 catches BL base node at StartPoint
-  for(int k = 1; k < nbLayers_; k++) qBdry.push_back(grid[N][k]);
-
-  // --- Snap triangle fringe vertices to nearest quad boundary vertex ---
-  // A fringe vertex belongs to at least one deleted element AND one surviving triangle.
-  // Boundary nodes (dim < 2) stay on their geometric entity and are never moved.
-  // Note: surviving BL quad vertices are intentionally excluded — the BL zone ends
-  // at its last arc_bl node (~0.05 units before StartPoint), so snapping those nodes
-  // to the BC left column would bridge an unbridgeable gap and invert quads.
-  std::set<MVertex *> survivingVSet;
-  for(auto *tri : gf->triangles)
-    for(int j = 0; j < 3; j++) survivingVSet.insert(tri->getVertex(j));
-
-  std::map<MVertex *, MVertex *> snapMap;
-  for(MVertex *v : deletedVSet) {
-    if(!survivingVSet.count(v) || gridSet.count(v)) continue;
-    if(v->onWhat() && v->onWhat()->dim() < 2) continue;
-    double bestD2 = 1e30;
-    MVertex *bestQ = nullptr;
-    for(MVertex *q : qBdry) {
-      double dx = v->x() - q->x(), dy = v->y() - q->y();
-      double d2 = dx * dx + dy * dy;
-      if(d2 < bestD2) { bestD2 = d2; bestQ = q; }
-    }
-    if(bestQ) {
-      snapMap[v] = bestQ;
-      fprintf(stderr, "DEBUG snap (%.4f,%.4f) -> (%.4f,%.4f) dist=%.4f\n",
-              v->x(), v->y(), bestQ->x(), bestQ->y(), sqrt(bestD2));
-    }
-  }
-  fprintf(stderr, "DEBUG snap: %d vertices snapped\n", (int)snapMap.size());
-
-  // Apply snap to surviving triangles
-  for(auto *tri : gf->triangles)
-    for(int j = 0; j < 3; j++) {
-      auto sm = snapMap.find(tri->getVertex(j));
-      if(sm != snapMap.end()) tri->setVertex(j, sm->second);
-    }
-
-  // Remove degenerate triangles (snapping can merge two vertices of the same triangle)
+  // --- Expand deletion to include fringe triangles ---
+  // Fringe triangles straddle the BC block boundary: their centroid is outside
+  // blockPoly but they share at least one vertex with the originally deleted zone.
+  // Deleting them gives a clean, gap-free cavity for constrained retriangulation.
+  const std::set<MVertex *> deletedVSet0 = deletedVSet;  // snapshot before expansion
   {
-    std::vector<MTriangle *> validTri;
+    std::vector<MTriangle *> keep;
     for(auto *tri : gf->triangles) {
-      MVertex *a = tri->getVertex(0), *b = tri->getVertex(1), *c = tri->getVertex(2);
-      if(a == b || b == c || a == c) delete tri;
-      else validTri.push_back(tri);
+      bool isFringe = false;
+      for(int j = 0; j < 3 && !isFringe; j++)
+        if(deletedVSet0.count(tri->getVertex(j))) isFringe = true;
+      if(isFringe) {
+        for(int j = 0; j < 3; j++) deletedVSet.insert(tri->getVertex(j));
+        delete tri;
+      }
+      else keep.push_back(tri);
     }
-    gf->triangles = validTri;
+    gf->triangles = keep;
   }
 
-  // --- Insert BC structured quads (after cleanup so blockPoly is already correct) ---
-  for(int i = 0; i < N; i++) {
-    for(int k = 0; k < nbLayers_; k++) {
+  // --- Collect outer cavity boundary edges from the surviving triangulation ---
+  // A boundary edge of the surviving mesh that has at least one vertex in the
+  // deleted zone is a cavity outer boundary edge (it borders the cavity from outside).
+  std::vector<MEdge> constraints;
+  {
+    std::map<MEdge, int, Less_Edge> edgeCnt;
+    for(auto *tri : gf->triangles)
+      for(int j = 0; j < 3; j++)
+        edgeCnt[tri->getEdge(j)]++;
+    for(auto it = edgeCnt.begin(); it != edgeCnt.end(); ++it) {
+      if(it->second == 1 &&
+         (deletedVSet.count(it->first.getVertex(0)) ||
+          deletedVSet.count(it->first.getVertex(1))))
+        constraints.push_back(it->first);
+    }
+  }
+  // BC outer boundary edges (top row of the BC block) — must be in the triangulation.
+  for(int i = 0; i < N; i++)
+    constraints.push_back(MEdge(grid[i][nbLayers_], grid[i + 1][nbLayers_]));
+  // BC left and right column edges — prevent the triangulation from reaching inside
+  // the BC block through the side columns.
+  for(int k = 0; k < nbLayers_; k++) {
+    constraints.push_back(MEdge(grid[0][k],     grid[0][k + 1]));
+    constraints.push_back(MEdge(grid[N][k],     grid[N][k + 1]));
+  }
+
+  // --- Collect cavity vertices for re-triangulation ---
+  // Include all freed vertices (deletedVSet) except those still held by surviving
+  // BL/BC quads, plus the full BC outer boundary and column anchor nodes.
+  std::set<MVertex *> survivingQuadVerts;
+  for(auto *q : gf->quadrangles)
+    for(int j = 0; j < 4; j++) survivingQuadVerts.insert(q->getVertex(j));
+
+  std::set<MVertex *> cavityVSet;
+  for(MVertex *v : deletedVSet)
+    if(!survivingQuadVerts.count(v)) cavityVSet.insert(v);
+  // BC outer boundary and side column nodes are constraint anchors; include them
+  // regardless of whether they appeared in deletedVSet.
+  for(int i = 0; i <= N; i++)
+    cavityVSet.insert(grid[i][nbLayers_]);
+  for(int k = 0; k <= nbLayers_; k++) {
+    cavityVSet.insert(grid[0][k]);
+    cavityVSet.insert(grid[N][k]);
+  }
+
+  std::vector<MVertex *> cavityVerts(cavityVSet.begin(), cavityVSet.end());
+
+  // --- Re-triangulate the cavity using constrained Delaunay ---
+  // delaunayMeshIn2D builds a fresh Delaunay triangulation of cavityVerts and
+  // recovers all constraint edges by diagonal swaps.
+  std::vector<MTriangle *> newTris;
+  delaunayMeshIn2D(cavityVerts, newTris, /*removeBox=*/true, &constraints);
+
+  // Discard any new triangle whose centroid falls inside the BC block (those cells
+  // will be filled by BC quads) and add the rest to the face.
+  int nNewTri = 0;
+  for(auto *tri : newTris) {
+    double cx = (tri->getVertex(0)->x() + tri->getVertex(1)->x() +
+                 tri->getVertex(2)->x()) / 3.0;
+    double cy = (tri->getVertex(0)->y() + tri->getVertex(1)->y() +
+                 tri->getVertex(2)->y()) / 3.0;
+    if(inPoly(cx, cy)) { delete tri; }
+    else { gf->triangles.push_back(tri); nNewTri++; }
+  }
+
+  // --- Insert BC structured quads ---
+  for(int i = 0; i < N; i++)
+    for(int k = 0; k < nbLayers_; k++)
       gf->quadrangles.push_back(new MQuadrangle(
-        grid[i][k],     grid[i + 1][k],
+        grid[i][k],         grid[i + 1][k],
         grid[i + 1][k + 1], grid[i][k + 1]));
-    }
-  }
 
-  // --- Final vertex purge: remove snapped-away and orphaned vertices ---
+  // --- Final vertex purge: remove orphaned vertices ---
   {
     std::set<MVertex *> keep;
     for(auto *t : gf->triangles)
@@ -3352,8 +3375,10 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
     gf->mesh_vertices = finalV;
   }
 
-  Msg::Info("BoundaryCorner: %d columns × %d layers = %d quads, snapped %d vertices (face %d)",
-            N, nbLayers_, N * nbLayers_, (int)snapMap.size(), gf->tag());
+  Msg::Info(
+    "BoundaryCorner: %d columns × %d layers = %d quads, "
+    "cavity retriangulation: %d new triangles (face %d)",
+    N, nbLayers_, N * nbLayers_, nNewTri, gf->tag());
 }
 
 double BoundaryCornerField::operator()(double x, double y, double z,
