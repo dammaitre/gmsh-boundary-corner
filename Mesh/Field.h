@@ -260,15 +260,13 @@ private:
   double h1_;                          // Size            : hauteur 1ère rangée BL
   double ratio_;                       // Ratio           : raison progression BL
   int    nbLayers_;                    // NbLayers        : nombre de rangées BL
-  int    nbCornerColumns_;             // NbCornerColumns : nombre de colonnes BC
-  double delta1_;                      // Delta1   : arc 1ère colonne au StartPoint (l_BL) ; -1 = ColWidth
-  double lBL_;                         // ColWidth : arc dernière colonne à l'AxisPoint (delta_1) ; -1 = Size
+  double w0max_;                       // MaxColumnWidth  : arc max colonne (1ère, au StartPoint)
+  double lBL_;                         // ColWidth : arc dernière colonne à l'AxisPoint ; -1 = Size
   double omega_;                       // Omega           : facteur hauteur (défaut 1.0)
 
   // Données calculées par computeParameters() / buildCornerColumns()
   double axisPoint_[2];
   double startPoint_[2];
-  double eps_;
   double lBLeff_;   // lBL_ résolu (> 0 : valeur utilisateur, sinon h1_)
   double hTotal_;
 

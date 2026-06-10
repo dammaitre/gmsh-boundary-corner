@@ -2996,8 +2996,8 @@ std::string BoundaryCornerField::getDescription()
 
 BoundaryCornerField::BoundaryCornerField()
   : h1_(1e-3), ratio_(1.15), nbLayers_(30),
-    nbCornerColumns_(10), delta1_(-1.0), lBL_(-1.0), omega_(1.0),
-    eps_(1.0), lBLeff_(1e-3), hTotal_(0.0)
+    w0max_(0.1), lBL_(-1.0), omega_(1.0),
+    lBLeff_(1e-3), hTotal_(0.0)
 {
   axisPoint_[0]  = axisPoint_[1]  = 0.0;
   startPoint_[0] = startPoint_[1] = 0.0;
@@ -3015,12 +3015,11 @@ BoundaryCornerField::BoundaryCornerField()
     ratio_, "Geometric growth ratio between successive BL rows", &update_needed);
   options["NbLayers"] = new FieldOptionInt(
     nbLayers_, "Number of BL rows", &update_needed);
-  options["NbCornerColumns"] = new FieldOptionInt(
-    nbCornerColumns_, "Number of quad columns in the BC zone", &update_needed);
-  options["Delta1"] = new FieldOptionDouble(
-    delta1_,
-    "Arc-length of the first BC column at StartPoint, matching the adjacent BL "
-    "tangential cell size (l_BL).  -1 = use ColWidth",
+  options["MaxColumnWidth"] = new FieldOptionDouble(
+    w0max_,
+    "Maximum column arc-length (first column at StartPoint, matching the adjacent "
+    "BL tangential cell size).  Number of columns is derived automatically to span "
+    "the StartPoint-to-AxisPoint arc.",
     &update_needed);
   options["ColWidth"] = new FieldOptionDouble(
     lBL_,
@@ -3034,8 +3033,7 @@ BoundaryCornerField::BoundaryCornerField()
 void BoundaryCornerField::computeParameters()
 {
   lBLeff_ = (lBL_ > 0.0) ? lBL_ : h1_;
-  if(lBLeff_ < 1e-100) lBLeff_ = 1e-100;  // prevent div-by-zero in eps_
-  double d1eff = (delta1_ > 0.0) ? delta1_ : lBLeff_;  // resolve without mutating delta1_
+  if(lBLeff_ < 1e-100) lBLeff_ = 1e-100;
 
   {
     auto it = axisPointList_.begin();
@@ -3052,12 +3050,6 @@ void BoundaryCornerField::computeParameters()
     hTotal_ = h1_ * nbLayers_;
   else
     hTotal_ = h1_ * (std::pow(ratio_, nbLayers_) - 1.0) / (ratio_ - 1.0);
-
-  // d1eff = first column at S (large, l_BL); lBLeff_ = last column at C (small)
-  // eps_ < 1 → compression toward the corner (C)
-  eps_ = (nbCornerColumns_ > 1)
-           ? std::pow(lBLeff_ / d1eff, 1.0 / (nbCornerColumns_ - 1))
-           : 1.0;
 }
 
 // Returns parameter t on ge closest to (x, y)
@@ -3082,8 +3074,8 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
 {
   computeParameters();
   if(curvesList_.empty()) return;
-  if(nbCornerColumns_ < 1 || nbLayers_ < 1) {
-    Msg::Error("BoundaryCorner: NbCornerColumns and NbLayers must be >= 1");
+  if(w0max_ <= 0.0 || nbLayers_ < 1) {
+    Msg::Error("BoundaryCorner: MaxColumnWidth must be > 0 and NbLayers >= 1");
     return;
   }
 
@@ -3099,8 +3091,6 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
     if(gf) break;
   }
   if(!gf) return;
-
-  int N = nbCornerColumns_;
 
   // --- Curve parameters at start and axis points ---
   double t_start = arcLengthToParam(ge, startPoint_[0], startPoint_[1]);
@@ -3119,17 +3109,46 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
     return;
   }
 
-  // --- Scale first column width so the N-column series spans exactly S_total ---
-  // eps_ (compression ratio) is preserved; only the absolute scale changes.
-  double w0 = (std::abs(eps_ - 1.0) < 1e-10)
+  // --- Derive N: smallest integer such that the geometric series spans S_total ---
+  // Series: w0_max, w0_max*eps, ..., w0_max*eps^(N-1)  with eps = (lBLeff_/w0max_)^(1/(N-1))
+  // sum(N) = w0_max * (1 - eps^N) / (1 - eps)
+  int N;
+  double eps;
+  const double q = lBLeff_ / w0max_;  // ratio last/first column (<1 for compression)
+
+  if(q >= 1.0 - 1e-10 || w0max_ >= S_total) {
+    // Uniform columns (no compression) or arc shorter than one column
+    N   = std::max(1, (int)std::ceil(S_total / w0max_));
+    eps = 1.0;
+  }
+  else {
+    // Large-N approximation: N ≈ 1 + S_total*ln(1/q) / (w0max_*(1-q))
+    double N_est = 1.0 + S_total * std::log(1.0 / q) / (w0max_ * (1.0 - q));
+    N = std::max(2, (int)std::ceil(N_est));
+
+    auto series_sum = [&](int n) -> double {
+      double e = std::pow(q, 1.0 / (n - 1));
+      return (std::abs(e - 1.0) < 1e-12) ? w0max_ * n
+             : w0max_ * (1.0 - std::pow(e, n)) / (1.0 - e);
+    };
+
+    while(series_sum(N) < S_total) ++N;          // guarantee coverage
+    while(N > 2 && series_sum(N - 1) >= S_total) --N;  // trim excess
+
+    eps = std::pow(q, 1.0 / (N - 1));
+  }
+
+  // Scale the series to span exactly S_total (preserves compression ratio eps,
+  // actual first column ≤ w0max_).
+  double w0 = (std::abs(eps - 1.0) < 1e-10)
               ? S_total / N
-              : S_total * (1.0 - eps_) / (1.0 - std::pow(eps_, N));
+              : S_total * (1.0 - eps) / (1.0 - std::pow(eps, N));
 
   // --- Build profile points (N+1 nodes from startPoint to axisPoint) ---
   std::vector<SPoint2> prof(N + 1);
   prof[0] = SPoint2(startPoint_[0], startPoint_[1]);
   for(int i = 1; i < N; i++) {
-    double Li    = w0 * std::pow(eps_, i - 1);
+    double Li    = w0 * std::pow(eps, i - 1);
     double t0    = arcLengthToParam(ge, prof[i - 1].x(), prof[i - 1].y());
     double speed = ge->firstDer(t0).norm();
     double dt    = (speed > 1e-14) ? Li / speed : 0.0;
@@ -3279,22 +3298,21 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
     gf->mesh_vertices = finalV;
   }
 
-  Msg::Info("BoundaryCorner: injected %d quads, snapped %d vertices (face %d)",
-            N * nbLayers_, (int)snapMap.size(), gf->tag());
+  Msg::Info("BoundaryCorner: %d columns × %d layers = %d quads, snapped %d vertices (face %d)",
+            N, nbLayers_, N * nbLayers_, (int)snapMap.size(), gf->tag());
 }
 
 double BoundaryCornerField::operator()(double x, double y, double z,
                                        GEntity *ge)
 {
   computeParameters();
-  double d1eff = (delta1_ > 0.0) ? delta1_ : lBLeff_;
   double dx   = x - axisPoint_[0];
   double dy   = y - axisPoint_[1];
   double dist = std::sqrt(dx * dx + dy * dy);
   double zone = hTotal_ * 5.0;
-  // at C (dist=0): corner cell = lBLeff_ (small); at zone edge: l_BL = d1eff (large)
+  // at C (dist=0): corner cell = lBLeff_ (small); at zone edge: w0max_ (large)
   if(zone > 0.0 && dist < zone)
-    return lBLeff_ + (d1eff - lBLeff_) * dist / zone;
+    return lBLeff_ + (w0max_ - lBLeff_) * dist / zone;
   return 1e22;
 }
 
