@@ -272,17 +272,16 @@ private:
   // Options exposées via FieldOption*
   std::list<int>    curvesList_;       // CurvesList      : tags des GEdge du profil
   std::list<double> axisPointList_;    // AxisPoint       : [x_a, 0.0]
-  std::list<double> startPointList_;   // StartPoint      : [x_s, y_s]
   double h1_;                          // Size            : hauteur 1ère rangée BL
   double ratio_;                       // Ratio           : raison progression BL
   int    nbLayers_;                    // NbLayers        : nombre de rangées BL
-  double w0max_;                       // MaxColumnWidth  : arc max colonne (1ère, au StartPoint)
+  int    nbCornerColumns_;             // NbCornerColumns : compressed columns near corner
+  double w0max_;                       // MaxColumnWidth  : arc max colonne (transition width)
   double lBL_;                         // ColWidth : arc dernière colonne à l'AxisPoint ; -1 = Size
   double omega_;                       // Omega           : facteur hauteur (défaut 1.0)
 
   // Données calculées par computeParameters() / buildCornerColumns()
   double axisPoint_[2];
-  double startPoint_[2];
   double lBLeff_;   // lBL_ résolu (> 0 : valeur utilisateur, sinon h1_)
   double hTotal_;
 

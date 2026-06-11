@@ -2,35 +2,34 @@
 
 ## Context
 
-2D axisymmetric CFD (OpenFOAM wedge). Fluid is **outside** the body. `y=0` is the symmetry axis. A body profile **P** meets the axis at 90° at the **corner C**. `BoundaryCornerField` inserts a structured quad fan in the region between a StartPoint **S** on P and **C**, replacing the unstructured triangles that would otherwise span that corner.
+2D axisymmetric CFD (OpenFOAM wedge). Fluid is **outside** the body. `y=0` is the symmetry axis. A body profile **P** meets the axis at 90° at the **corner C**. `BoundaryCornerField` covers the **entire** profile with structured quad columns: a geometrically compressed section near **C** and a constant-width section for the rest.
 
 ## Key geometry
 
-- **S** = StartPoint: on the profile, where BL ends and BC begins. Adjacent BL tangential cell size = l_BL.
 - **C** = AxisPoint: where P meets y=0 at 90°. Last quad column sits on the axis.
-- **Columns** run along the arc S→C (arc-length compression, decreasing widths).
-- **Layers** run outward along the surface normal (BL-style geometric growth).
+- **Compressed zone**: `NbCornerColumns` columns near C, arc-length decreasing from `MaxColumnWidth` to `ColWidth/Size`.
+- **Constant zone**: remaining profile covered with constant `MaxColumnWidth` columns.
+- **Layers** run outward along the surface normal (BL-style geometric growth) for all columns.
 - Last column (at C) lies on y=0 because the normal at C is horizontal (+x).
 
 ## Options (Field.h / Field.cpp constructor)
 
 | Option | Member | Semantics |
 |---|---|---|
-| `CurvesList` | `curvesList_` | GEdge tags of the profile |
+| `CurvesList` | `curvesList_` | GEdge tags of the full profile |
 | `AxisPoint` | `axisPointList_` | [x_C, 0.0] — corner |
-| `StartPoint` | `startPointList_` | [x_S, y_S] — BC zone start |
 | `Size` | `h1_` | First BL layer normal height |
 | `Ratio` | `ratio_` | BL layer geometric ratio |
 | `NbLayers` | `nbLayers_` | Number of BL rows (k direction) |
-| `NbCornerColumns` | `nbCornerColumns_` | Number of quad columns (i direction) |
-| `Delta1` | `delta1_` | **First** column arc-length at S (= l_BL, large). -1 → use ColWidth |
-| `ColWidth` | `lBL_` | **Last** column arc-length at C (corner cell, small). -1 → use Size |
+| `NbCornerColumns` | `nbCornerColumns_` | Number of compressed columns near AxisPoint |
+| `MaxColumnWidth` | `w0max_` | Column arc-length in the constant zone; max in the compressed zone |
+| `ColWidth` | `lBL_` | Arc-length of the innermost column at AxisPoint. -1 → use Size |
 | `Omega` | `omega_` | Layer height scale factor (default 1.0) |
 
 **Parameter semantics (important):**
-- `Delta1` is the **large** BL-matching value at S; `Size`/`ColWidth` is the **small** corner value at C.
-- Compression ratio: `eps = (lBLeff / d1eff)^(1/(N-1))` — requires `Delta1 > ColWidth/Size` for `eps < 1`.
-- `lBLeff = lBL_ if lBL_ > 0 else h1_`; `d1eff = delta1_ if delta1_ > 0 else lBLeff`.
+- `ColWidth`/`Size` is the **small** corner value; `MaxColumnWidth` is the **large** transition value.
+- Compression ratio: `eps = (lBLeff / w0max_)^(1/(NbCornerColumns-1))`.
+- `lBLeff = lBL_ if lBL_ > 0 else h1_`.
 
 ## Class layout (Mesh/Field.h)
 
@@ -38,13 +37,12 @@
 class BoundaryCornerField : public Field {
   // Options (stored as members, bound via FieldOption*):
   std::list<int>    curvesList_;
-  std::list<double> axisPointList_, startPointList_;
-  double h1_, ratio_, delta1_, lBL_, omega_;
+  std::list<double> axisPointList_;
+  double h1_, ratio_, lBL_, omega_, w0max_;
   int    nbLayers_, nbCornerColumns_;
 
   // Computed:
-  double axisPoint_[2], startPoint_[2];
-  double eps_;      // tangential compression ratio (<1 = compress toward C)
+  double axisPoint_[2];
   double lBLeff_;   // resolved ColWidth (lBL_ > 0 ? lBL_ : h1_)
   double hTotal_;   // total BL height
 
@@ -155,13 +153,13 @@ mmg3d disabled: pre-existing linker bug in bundled v4.0, unrelated to this work.
 ## Test
 
 ```bash
-python test_bc.py          # headless — prints triangle/quad counts
-python test_bc.py --gui    # opens result in gmsh GUI
+python3 test_bc.py          # headless — prints triangle/quad counts
+python3 test_bc.py --gui    # opens result in gmsh GUI
 ```
 
-Expected output (H1=0.012, RATIO=1.20, N_LAY=6, W0_MAX=0.06):
-- ~289 quadrangles (BL + BC structured quads)
-- ~2453 triangles (far-field Delaunay)
+Expected output (H1=0.012, RATIO=1.20, N_LAY=6, N_COLS=8, W0_MAX=0.06):
+- ~348 quadrangles (full-profile BC structured quads)
+- ~2192 triangles (far-field Delaunay)
 
 ## Bug fixes (branch `snap-remove`)
 
