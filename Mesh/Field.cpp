@@ -3156,6 +3156,19 @@ bool BoundaryCornerField::buildForFace(
     return false;
   }
 
+  // At the BL/BC junction (baseVerts[bcStart]), the BL fan's last quad has the
+  // junction vertex at j=2 and the BL outermost vertex (c1_top) at j=3.
+  // Reusing c1_top as grid[0][nbLayers_] closes the gap between the BL outer row
+  // and the BC outer row.  Without this the Delaunay fills a ~h_total-wide wedge
+  // between the two independently-placed outer vertices with triangles that reach
+  // down to the profile.
+  MVertex *blOuterAtJunction = nullptr;
+  {
+    MVertex *jv = baseVerts[bcStart];
+    for(auto *q : blQuads)
+      if(q->getVertex(2) == jv) { blOuterAtJunction = q->getVertex(3); break; }
+  }
+
   // Build grid[i][k]: i indexes columns starting from baseVerts[bcStart].
   // For the last column (i==N, axis column) outer vertices lie on y=0 and are
   // classified on axisEdge so they participate in the edge's 1D mesh.
@@ -3186,6 +3199,8 @@ bool BoundaryCornerField::buildForFace(
     }
 
     for(int k = 1; k <= nbLayers_; k++) {
+      if(useStitch && i == 0 && k < nbLayers_)
+        continue;  // intermediate col-0 vertices unused in stitch path
       double hk = (std::abs(ratio_ - 1.0) < 1e-10)
                   ? h1_ * omega_ * k
                   : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
@@ -3266,18 +3281,37 @@ bool BoundaryCornerField::buildForFace(
   // Collect all BC face-interior vertices, including the axis column.
   for(int i = 0; i <= N; i++)
     for(int k = 1; k <= nbLayers_; k++)
-      if(!blVerts.count(grid[i][k])) verts.insert(grid[i][k]);
+      if(grid[i][k] && !blVerts.count(grid[i][k]))
+        verts.insert(grid[i][k]);
 
   // Outer boundary MLines (k = nbLayers_ row, used as re-triangulation constraint)
   for(int i = 0; i < N; i++)
     outerLines.push_back(new MLine(grid[i][nbLayers_], grid[i + 1][nbLayers_]));
 
-  // BC structured quads
-  for(int i = 0; i < N; i++)
-    for(int k = 0; k < nbLayers_; k++)
-      bcQuads.push_back(new MQuadrangle(
-        grid[i][k],         grid[i + 1][k],
-        grid[i + 1][k + 1], grid[i][k + 1]));
+  if(useStitch) {
+    // Replace BC column 0 with a single stitch quad that:
+    //   • cancels the BL right-wall edge (blOuterAtJunction → junction)
+    //   • cancels the first arc_bc domain segment (junction → baseVerts[bcStart+1])
+    //   • bridges the BL outer row to the BC outer row (grid[0][nbLayers_])
+    // The remaining pocket (from grid[0][nbLayers_] down to baseVerts[bcStart+1]
+    // and back up via BC column 1's left wall) is one column wide and is
+    // triangulated cleanly by the Delaunay without touching the junction profile.
+    bcQuads.push_back(new MQuadrangle(
+      blOuterAtJunction, baseVerts[bcStart],
+      baseVerts[bcStart + 1], grid[0][nbLayers_]));
+    for(int i = 1; i < N; i++)
+      for(int k = 0; k < nbLayers_; k++)
+        bcQuads.push_back(new MQuadrangle(
+          grid[i][k],         grid[i + 1][k],
+          grid[i + 1][k + 1], grid[i][k + 1]));
+  }
+  else {
+    for(int i = 0; i < N; i++)
+      for(int k = 0; k < nbLayers_; k++)
+        bcQuads.push_back(new MQuadrangle(
+          grid[i][k],         grid[i + 1][k],
+          grid[i + 1][k + 1], grid[i][k + 1]));
+  }
 
   Msg::Warning("BoundaryCorner (pre-mesh): %d columns x %d layers = %d quads (face %d), axisEdge=%d",
             N, nbLayers_, N * nbLayers_, gf->tag(), axisEdge ? axisEdge->tag() : -1);
