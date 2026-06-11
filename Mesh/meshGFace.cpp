@@ -1101,9 +1101,29 @@ static void modifyInitialMeshForBoundaryCorners(
       mv.end());
   }
 
+  // --- DIAGNOSTIC: check bedge polygon validity ---
+  {
+    std::map<MVertex *, int> deg;
+    for(auto &e : bedges) {
+      deg[e.getVertex(0)]++;
+      deg[e.getVertex(1)]++;
+    }
+    int bad = 0;
+    for(auto &kv : deg) if(kv.second != 2) bad++;
+    fprintf(stderr, "DBG bedges=%d vertices=%d bad_degree=%d\n",
+            (int)bedges.size(), (int)deg.size(), bad);
+    if(bad > 0) {
+      for(auto &kv : deg)
+        if(kv.second != 2)
+          fprintf(stderr, "  deg%d @ (%g,%g) tag=%d onWhat=%d\n",
+                  kv.second, kv.first->x(), kv.first->y(),
+                  kv.first->getNum(), (int)(kv.first->onWhat()->dim()));
+    }
+  }
   deMeshGFace kil;
   kil(gf);
   meshGenerator(gf, 0, 0, true, false, &hop);
+  fprintf(stderr, "DBG after inner mesher: tri=%d\n", (int)gf->triangles.size());
 
   // After the inner mesher, _deleteUnusedVertices has re-added protected_verts
   // to gf->mesh_vertices (they appear on the boundary of the triangulated
