@@ -267,7 +267,9 @@ public:
                     std::vector<MQuadrangle *> &bcQuads,
                     std::set<MVertex *> &verts,
                     std::vector<MLine *> &outerLines,
-                    std::map<MVertex *, std::vector<MVertex *>> &junctionMap);
+                    std::map<MVertex *, std::vector<MVertex *>> &junctionMap,
+                    GEdge *&axisEdgeOut,
+                    std::vector<MVertex *> &axisColVertsOut);
 
 private:
   // Options exposées via FieldOption*
@@ -280,6 +282,7 @@ private:
   double w0max_;                       // MaxColumnWidth  : arc max colonne (transition width)
   double lBL_;                         // ColWidth : arc dernière colonne à l'AxisPoint ; -1 = Size
   double omega_;                       // Omega           : facteur hauteur (défaut 1.0)
+  int    skipAxisColumn_;              // SkipAxisColumn  : 1 = omit the y=0 axis column (for 3D revolve)
 
   // Données calculées par computeParameters() / buildCornerColumns()
   double axisPoint_[2];

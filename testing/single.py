@@ -19,7 +19,7 @@ Run:  python test_bc.py           # headless
 
 import sys, os, math, subprocess
 
-_root = os.path.dirname(os.path.abspath(__file__))
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_root, "api"))
 os.environ["GMSH_LIB"] = os.path.join(_root, "build", "libgmsh.so")
 

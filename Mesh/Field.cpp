@@ -2999,7 +2999,7 @@ std::string BoundaryCornerField::getDescription()
 BoundaryCornerField::BoundaryCornerField()
   : h1_(1e-3), ratio_(1.15), nbLayers_(30),
     nbCornerColumns_(10), w0max_(0.1), lBL_(-1.0), omega_(1.0),
-    lBLeff_(1e-3), hTotal_(0.0)
+    skipAxisColumn_(0), lBLeff_(1e-3), hTotal_(0.0)
 {
   axisPoint_[0] = axisPoint_[1] = 0.0;
 
@@ -3030,6 +3030,13 @@ BoundaryCornerField::BoundaryCornerField()
     &update_needed);
   options["Omega"] = new FieldOptionDouble(
     omega_, "Height scale factor for BC rows (default 1.0)", &update_needed);
+  options["SkipAxisColumn"] = new FieldOptionInt(
+    skipAxisColumn_,
+    "Set to 1 to omit the structured quad column exactly on y=0 (the AxisPoint "
+    "column).  Required when the 2D mesh will be revolved for a 3D wedge (e.g. "
+    "OpenFOAM axisymmetric); the axis column creates zero-volume cells under "
+    "rotation.  Default 0 (column included, correct for 2D axisymmetric).",
+    &update_needed);
 }
 
 void BoundaryCornerField::computeParameters()
@@ -3074,8 +3081,11 @@ bool BoundaryCornerField::buildForFace(
   std::vector<MQuadrangle *> &bcQuads,
   std::set<MVertex *> &verts,
   std::vector<MLine *> &outerLines,
-  std::map<MVertex *, std::vector<MVertex *>> &junctionMap)
+  std::map<MVertex *, std::vector<MVertex *>> &junctionMap,
+  GEdge *&axisEdgeOut,
+  std::vector<MVertex *> &axisColVertsOut)
 {
+  axisEdgeOut = nullptr;
   computeParameters();
   if(curvesList_.empty() || nbLayers_ < 1) return false;
 
@@ -3149,8 +3159,8 @@ bool BoundaryCornerField::buildForFace(
   // With a known axis edge we include the last column (axis column) as quads.
   // Without it fall back to the old behaviour: skip the last column and let
   // Delaunay fill the small gap with a triangle.
-  int N = (axisEdge) ? (int)baseVerts.size() - 1 - bcStart
-                     : (int)baseVerts.size() - 2 - bcStart;
+  int N = (axisEdge && !skipAxisColumn_) ? (int)baseVerts.size() - 1 - bcStart
+                                        : (int)baseVerts.size() - 2 - bcStart;
   if(N < 1) {
     Msg::Warning("BoundaryCorner: no arc_bc segments remain after BL fan for GEdge %d", ge->tag());
     return false;
@@ -3168,6 +3178,8 @@ bool BoundaryCornerField::buildForFace(
     for(auto *q : blQuads)
       if(q->getVertex(2) == jv) { blOuterAtJunction = q->getVertex(3); break; }
   }
+  const bool useStitch = (blOuterAtJunction != nullptr) &&
+                         (bcStart + 1 < (int)baseVerts.size());
 
   // Build grid[i][k]: i indexes columns starting from baseVerts[bcStart].
   // For the last column (i==N, axis column) outer vertices lie on y=0 and are
@@ -3278,7 +3290,17 @@ bool BoundaryCornerField::buildForFace(
     }
   }
 
-  // Collect all BC face-interior vertices, including the axis column.
+  // Export axis edge + axis-column outer vertices so the caller can reclassify
+  // them from gf to axisEdge AFTER _deleteUnusedVertices (where reparamOnFace
+  // is no longer needed and the vertices still live in gf->mesh_vertices).
+  if(axisEdge) {
+    axisEdgeOut = axisEdge;
+    for(int k = 1; k <= nbLayers_; k++)
+      axisColVertsOut.push_back(grid[N][k]);
+  }
+
+  // Collect all BC face-interior vertices including the axis column.
+  // The axis-column verts stay classified on gf until the caller reclassifies.
   for(int i = 0; i <= N; i++)
     for(int k = 1; k <= nbLayers_; k++)
       if(grid[i][k] && !blVerts.count(grid[i][k]))

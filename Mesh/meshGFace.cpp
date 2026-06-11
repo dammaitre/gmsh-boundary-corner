@@ -1035,7 +1035,8 @@ static void modifyInitialMeshForBoundaryCorners(
   const std::vector<MQuadrangle *> &blQuads,
   const std::set<MVertex *> &blVerts,
   std::vector<MQuadrangle *> &bcQuads,
-  std::set<MVertex *> &verts)
+  std::set<MVertex *> &verts,
+  std::vector<std::pair<GEdge *, std::vector<MVertex *>>> &axisReclassify)
 {
   FieldManager *fields = gf->model()->getFields();
   std::vector<MLine *> outerLines;
@@ -1046,9 +1047,13 @@ static void modifyInitialMeshForBoundaryCorners(
     BoundaryCornerField *bcf =
       dynamic_cast<BoundaryCornerField *>(it->second);
     if(!bcf) continue;
+    GEdge *axisEdgeOut = nullptr;
+    std::vector<MVertex *> axisColVertsOut;
     if(bcf->buildForFace(gf, blQuads, blVerts, bcQuads, verts, outerLines,
-                         junctionMap))
+                         junctionMap, axisEdgeOut, axisColVertsOut))
       anyApplied = true;
+    if(axisEdgeOut && !axisColVertsOut.empty())
+      axisReclassify.push_back({axisEdgeOut, std::move(axisColVertsOut)});
   }
   if(!anyApplied || outerLines.empty()) {
     for(auto *l : outerLines) delete l;
@@ -1103,29 +1108,9 @@ static void modifyInitialMeshForBoundaryCorners(
       mv.end());
   }
 
-  // --- DIAGNOSTIC: check bedge polygon validity ---
-  {
-    std::map<MVertex *, int> deg;
-    for(auto &e : bedges) {
-      deg[e.getVertex(0)]++;
-      deg[e.getVertex(1)]++;
-    }
-    int bad = 0;
-    for(auto &kv : deg) if(kv.second != 2) bad++;
-    fprintf(stderr, "DBG bedges=%d vertices=%d bad_degree=%d\n",
-            (int)bedges.size(), (int)deg.size(), bad);
-    if(bad > 0) {
-      for(auto &kv : deg)
-        if(kv.second != 2)
-          fprintf(stderr, "  deg%d @ (%g,%g) tag=%d onWhat=%d\n",
-                  kv.second, kv.first->x(), kv.first->y(),
-                  kv.first->getNum(), (int)(kv.first->onWhat()->dim()));
-    }
-  }
   deMeshGFace kil;
   kil(gf);
   meshGenerator(gf, 0, 0, true, false, &hop);
-  fprintf(stderr, "DBG after inner mesher: tri=%d\n", (int)gf->triangles.size());
 
   // After the inner mesher, _deleteUnusedVertices has re-added protected_verts
   // to gf->mesh_vertices (they appear on the boundary of the triangulated
@@ -1138,6 +1123,10 @@ static void modifyInitialMeshForBoundaryCorners(
       [&protected_verts](MVertex *v){ return protected_verts.count(v) > 0; }),
       mv.end());
   }
+
+  // axisReclassify is returned to the caller. The actual setEntity() is deferred
+  // until after _deleteUnusedVertices so the vertices survive in gf->mesh_vertices
+  // (which only preserves vertices with onWhat()==gf at that point).
 
   // Clean up temporary MLine objects owned by ne
   for(auto *l : ne.lines) delete l;
@@ -1842,8 +1831,10 @@ bool meshGenerator(GFace *gf, int RECUR_ITER, bool repairSelfIntersecting1dMesh,
   if(!onlyInitialMesh)
     modifyInitialMeshForBoundaryLayers(gf, blQuads, blTris, verts, debug);
 
+  std::vector<std::pair<GEdge *, std::vector<MVertex *>>> axisReclassify;
   if(!onlyInitialMesh)
-    modifyInitialMeshForBoundaryCorners(gf, blQuads, verts, bcQuads, bcVerts);
+    modifyInitialMeshForBoundaryCorners(gf, blQuads, verts, bcQuads, bcVerts,
+                                        axisReclassify);
 
   // the delaunay algo is based directly on internal gmsh structures BDS mesh is
   // passed in order not to recompute local coordinates of vertices
@@ -1914,6 +1905,19 @@ bool meshGenerator(GFace *gf, int RECUR_ITER, bool repairSelfIntersecting1dMesh,
 
   // remove unused vertices, generated e.g. during background mesh
   _deleteUnusedVertices(gf);
+
+  // Reclassify axis-column outer vertices from gf to their axisEdge.
+  // Done here, after _deleteUnusedVertices, so the vertices remain in
+  // gf->mesh_vertices (onWhat()==gf when _deleteUnusedVertices ran) and are
+  // still written to the .msh file.  The 3D extrusion sweeper uses onWhat() to
+  // assign lateral faces to the correct surface, so reclassifying to axisEdge
+  // ensures those lateral quads land in the axis curve's physical group rather
+  // than defaultFaces.  We do NOT add them to axisEdge->mesh_vertices to avoid
+  // double-ownership: axisEdge->deleteMesh() (called during 3D meshing) would
+  // free them while gf->quadrangles still holds raw pointers.
+  for(auto &[ae, acv] : axisReclassify)
+    for(auto *v : acv)
+      v->setEntity(ae);
 
   return true;
 }
