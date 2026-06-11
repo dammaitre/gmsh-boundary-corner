@@ -172,6 +172,42 @@ Because Gmsh's `meshGFace()` calls `GFace::deleteMesh()` internally, any element
 
 ---
 
+## Building this fork
+
+**Prerequisites:** C++ compiler, CMake, and FLTK (for the GUI). See the original Gmsh readme below for full dependency details.
+
+### First-time configuration
+
+```bash
+mkdir -p build && cd build
+cmake -DENABLE_BUILD_DYNAMIC=1 -DENABLE_MMG3D=0 ..
+```
+
+`ENABLE_BUILD_DYNAMIC=1` is required to produce the shared library used by the Python API (`test_bc.py`). `ENABLE_MMG3D=0` disables mmg3d, which has a pre-existing linker bug in the bundled v4.0 unrelated to this work.
+
+### Build targets
+
+```bash
+# Python API — needed for test_bc.py (headless testing)
+cd build && make -j$(nproc) shared
+
+# Gmsh binary — needed for --gui visualisation
+cd build && make -j$(nproc) gmsh
+```
+
+### Running the tests
+
+```bash
+python test_bc.py            # headless — prints triangle/quad counts
+python test_bc.py --gui      # opens result in gmsh GUI
+```
+
+Expected output (H1=0.012, RATIO=1.20, N_LAY=6, W0_MAX=0.06):
+- ~289 quadrangles (BL + BC structured quads)
+- ~2453 triangles (far-field Delaunay)
+
+---
+
 # GMSH's original readme.txt :
 
 This is Gmsh, an automatic three-dimensional finite element mesh generator with
