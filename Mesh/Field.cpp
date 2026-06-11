@@ -3073,7 +3073,8 @@ bool BoundaryCornerField::buildForFace(
   const std::set<MVertex *> &blVerts,
   std::vector<MQuadrangle *> &bcQuads,
   std::set<MVertex *> &verts,
-  std::vector<MLine *> &outerLines)
+  std::vector<MLine *> &outerLines,
+  std::map<MVertex *, std::vector<MVertex *>> &junctionMap)
 {
   computeParameters();
   if(curvesList_.empty() || nbLayers_ < 1) return false;
@@ -3158,6 +3159,9 @@ bool BoundaryCornerField::buildForFace(
   // Build grid[i][k]: i indexes columns starting from baseVerts[bcStart].
   // For the last column (i==N, axis column) outer vertices lie on y=0 and are
   // classified on axisEdge so they participate in the edge's 1D mesh.
+  // For the first column (i==0, non-axis end), reuse outer vertices from a
+  // previously processed BC field if that field already built the same column
+  // (junction sharing: two BC arcs meeting at a common GVertex).
   std::vector<std::vector<MVertex *>> grid(N + 1,
     std::vector<MVertex *>(nbLayers_ + 1, nullptr));
 
@@ -3168,11 +3172,31 @@ bool BoundaryCornerField::buildForFace(
     SPoint2 ni = normalAtPoint(ge, ti);
     double bx = bv->x(), by = bv->y();
     GEntity *outerEnt = gf;
+
+    // At the non-axis end (i==0), reuse outer vertices if another BC field
+    // already owns this junction base vertex — avoids duplicate walls in XOR.
+    if(i == 0) {
+      auto jit = junctionMap.find(bv);
+      if(jit != junctionMap.end() &&
+         (int)jit->second.size() == nbLayers_) {
+        for(int k = 1; k <= nbLayers_; k++)
+          grid[0][k] = jit->second[k - 1];
+        continue;
+      }
+    }
+
     for(int k = 1; k <= nbLayers_; k++) {
       double hk = (std::abs(ratio_ - 1.0) < 1e-10)
                   ? h1_ * omega_ * k
                   : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
       grid[i][k] = new MVertex(bx + ni.x() * hk, by + ni.y() * hk, 0.0, outerEnt);
+    }
+
+    // Register the non-axis end column so a subsequent BC field can share it.
+    if(i == 0) {
+      std::vector<MVertex *> col(nbLayers_);
+      for(int k = 1; k <= nbLayers_; k++) col[k - 1] = grid[0][k];
+      junctionMap[bv] = std::move(col);
     }
   }
 
@@ -3186,18 +3210,22 @@ bool BoundaryCornerField::buildForFace(
     MVertex *axisVert = baseVerts.back();
     double xNose  = axisVert->x();
     double xOuter = grid[N][nbLayers_]->x();
+    // xOuter > xNose for a downstream (nose) axis, xOuter < xNose for an
+    // upstream (tail) axis — use min/max so both cases find the right lines.
+    double xMin = std::min(xNose, xOuter);
+    double xMax = std::max(xNose, xOuter);
 
     MVertex *vReconnect = nullptr;
     std::vector<int> toRemove;
     for(int li = 0; li < (int)axisEdge->lines.size(); li++) {
       MLine *ml   = axisEdge->lines[li];
       MVertex *va = ml->getVertex(0), *vb = ml->getVertex(1);
-      bool aIn = (va->x() >= xNose - 1e-14 && va->x() <= xOuter + 1e-14);
-      bool bIn = (vb->x() >= xNose - 1e-14 && vb->x() <= xOuter + 1e-14);
+      bool aIn = (va->x() >= xMin - 1e-14 && va->x() <= xMax + 1e-14);
+      bool bIn = (vb->x() >= xMin - 1e-14 && vb->x() <= xMax + 1e-14);
       if(aIn && bIn) {
         toRemove.push_back(li);
       } else if(aIn != bIn) {
-        // Straddle: one vertex inside range, one outside (beyond xOuter)
+        // Straddle: one vertex inside range, one outside (beyond the outer column)
         toRemove.push_back(li);
         vReconnect = aIn ? vb : va;
       }
@@ -3224,13 +3252,13 @@ bool BoundaryCornerField::buildForFace(
       // grid[N][k] are classified on gf (not axisEdge) so they are NOT added here.
       auto &mv = axisEdge->mesh_vertices;
       auto rmBegin = std::remove_if(mv.begin(), mv.end(),
-        [xNose, xOuter](MVertex *v) {
-          return v->x() >= xNose - 1e-14 && v->x() <= xOuter + 1e-14;
+        [xMin, xMax](MVertex *v) {
+          return v->x() >= xMin - 1e-14 && v->x() <= xMax + 1e-14;
         });
       for(auto vit = rmBegin; vit != mv.end(); ++vit) delete *vit;
       mv.erase(rmBegin, mv.end());
     } else {
-      Msg::Warning("BoundaryCorner: failed to subdivide axis GEdge %d near nose",
+      Msg::Warning("BoundaryCorner: failed to subdivide axis GEdge %d near axis point",
                    axisEdge->tag());
     }
   }
@@ -3251,8 +3279,8 @@ bool BoundaryCornerField::buildForFace(
         grid[i][k],         grid[i + 1][k],
         grid[i + 1][k + 1], grid[i][k + 1]));
 
-  Msg::Info("BoundaryCorner (pre-mesh): %d columns × %d layers = %d quads (face %d)",
-            N, nbLayers_, N * nbLayers_, gf->tag());
+  Msg::Warning("BoundaryCorner (pre-mesh): %d columns x %d layers = %d quads (face %d), axisEdge=%d",
+            N, nbLayers_, N * nbLayers_, gf->tag(), axisEdge ? axisEdge->tag() : -1);
   return true;
 }
 

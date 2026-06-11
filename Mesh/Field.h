@@ -266,7 +266,8 @@ public:
                     const std::set<MVertex *> &blVerts,
                     std::vector<MQuadrangle *> &bcQuads,
                     std::set<MVertex *> &verts,
-                    std::vector<MLine *> &outerLines);
+                    std::vector<MLine *> &outerLines,
+                    std::map<MVertex *, std::vector<MVertex *>> &junctionMap);
 
 private:
   // Options exposées via FieldOption*
