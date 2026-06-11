@@ -2,35 +2,34 @@
 
 ## Context
 
-2D axisymmetric CFD (OpenFOAM wedge). Fluid is **outside** the body. `y=0` is the symmetry axis. A body profile **P** meets the axis at 90° at the **corner C**. `BoundaryCornerField` inserts a structured quad fan in the region between a StartPoint **S** on P and **C**, replacing the unstructured triangles that would otherwise span that corner.
+2D axisymmetric CFD (OpenFOAM wedge). Fluid is **outside** the body. `y=0` is the symmetry axis. A body profile **P** meets the axis at 90° at the **corner C**. `BoundaryCornerField` covers the **entire** profile with structured quad columns: a geometrically compressed section near **C** and a constant-width section for the rest.
 
 ## Key geometry
 
-- **S** = StartPoint: on the profile, where BL ends and BC begins. Adjacent BL tangential cell size = l_BL.
 - **C** = AxisPoint: where P meets y=0 at 90°. Last quad column sits on the axis.
-- **Columns** run along the arc S→C (arc-length compression, decreasing widths).
-- **Layers** run outward along the surface normal (BL-style geometric growth).
+- **Compressed zone**: `NbCornerColumns` columns near C, arc-length decreasing from `MaxColumnWidth` to `ColWidth/Size`.
+- **Constant zone**: remaining profile covered with constant `MaxColumnWidth` columns.
+- **Layers** run outward along the surface normal (BL-style geometric growth) for all columns.
 - Last column (at C) lies on y=0 because the normal at C is horizontal (+x).
 
 ## Options (Field.h / Field.cpp constructor)
 
 | Option | Member | Semantics |
 |---|---|---|
-| `CurvesList` | `curvesList_` | GEdge tags of the profile |
+| `CurvesList` | `curvesList_` | GEdge tags of the full profile |
 | `AxisPoint` | `axisPointList_` | [x_C, 0.0] — corner |
-| `StartPoint` | `startPointList_` | [x_S, y_S] — BC zone start |
 | `Size` | `h1_` | First BL layer normal height |
 | `Ratio` | `ratio_` | BL layer geometric ratio |
 | `NbLayers` | `nbLayers_` | Number of BL rows (k direction) |
-| `NbCornerColumns` | `nbCornerColumns_` | Number of quad columns (i direction) |
-| `Delta1` | `delta1_` | **First** column arc-length at S (= l_BL, large). -1 → use ColWidth |
-| `ColWidth` | `lBL_` | **Last** column arc-length at C (corner cell, small). -1 → use Size |
+| `NbCornerColumns` | `nbCornerColumns_` | Number of compressed columns near AxisPoint |
+| `MaxColumnWidth` | `w0max_` | Column arc-length in the constant zone; max in the compressed zone |
+| `ColWidth` | `lBL_` | Arc-length of the innermost column at AxisPoint. -1 → use Size |
 | `Omega` | `omega_` | Layer height scale factor (default 1.0) |
 
 **Parameter semantics (important):**
-- `Delta1` is the **large** BL-matching value at S; `Size`/`ColWidth` is the **small** corner value at C.
-- Compression ratio: `eps = (lBLeff / d1eff)^(1/(N-1))` — requires `Delta1 > ColWidth/Size` for `eps < 1`.
-- `lBLeff = lBL_ if lBL_ > 0 else h1_`; `d1eff = delta1_ if delta1_ > 0 else lBLeff`.
+- `ColWidth`/`Size` is the **small** corner value; `MaxColumnWidth` is the **large** transition value.
+- Compression ratio: `eps = (lBLeff / w0max_)^(1/(NbCornerColumns-1))`.
+- `lBLeff = lBL_ if lBL_ > 0 else h1_`.
 
 ## Class layout (Mesh/Field.h)
 
@@ -38,13 +37,12 @@
 class BoundaryCornerField : public Field {
   // Options (stored as members, bound via FieldOption*):
   std::list<int>    curvesList_;
-  std::list<double> axisPointList_, startPointList_;
-  double h1_, ratio_, delta1_, lBL_, omega_;
+  std::list<double> axisPointList_;
+  double h1_, ratio_, lBL_, omega_, w0max_;
   int    nbLayers_, nbCornerColumns_;
 
   // Computed:
-  double axisPoint_[2], startPoint_[2];
-  double eps_;      // tangential compression ratio (<1 = compress toward C)
+  double axisPoint_[2];
   double lBLeff_;   // resolved ColWidth (lBL_ > 0 ? lBL_ : h1_)
   double hTotal_;   // total BL height
 
@@ -124,8 +122,10 @@ Called from `modifyInitialMeshForBoundaryCorners` (meshGFace.cpp), itself called
 5. Build `grid[i][k]`: base at `baseVerts[bcStart+i]`, outer rows at `base + k*h_k * normal`.
 6. Fill `bcQuads` (N×nbLayers_ quads), `verts` (BC inner+outer vertices), `outerLines` (outer-row MLines).
 
-**Axis column exclusion (N = size-2 instead of size-1):**
-At `theta=0°` the outward normal is `+x`, so BC outer vertices land at `(2+h_k, 0)` — exactly on the axis (y=0). These collinear vertices sit between `p_nose` and the nearest `l_ax` mesh vertex, preventing constrained-Delaunay edge recovery. Excluding the last column leaves a short `arc_bc` gap that the inner Delaunay fills with one or two small triangles.
+**Axis column included (N = size-1 instead of size-2):**
+The last column at `theta=0°` is now included as structured quads. Its outer vertices land on `y=0` at `(x_C + h_k, 0)`. To make the XOR bedges close correctly, the axis GEdge's 1D mesh (`axisEdge->lines`) is subdivided to replace the MLines that would overlap the new column with a chain: `vReconnect → grid[N][nbLayers_] → ... → grid[N][1] → axisVert`. The XOR then cancels all shared edges between the BC quads and the new axis chain, leaving a clean closed bedge loop.
+
+**Key classification rule:** `grid[N][k]` (axis-column outer vertices) are classified on `gf` (dim=2), NOT on `axisEdge`. This is required so `reparamMeshVertexOnFace` can compute correct (x,y) parametric coordinates for the inner BDS Delaunay mesher. Classifying them on `axisEdge` causes `reparamOnFace(t=0)` to return the farfield endpoint instead of the actual vertex position, breaking edge recovery.
 
 ### `modifyInitialMeshForBoundaryCorners` (Mesh/meshGFace.cpp)
 
@@ -155,13 +155,13 @@ mmg3d disabled: pre-existing linker bug in bundled v4.0, unrelated to this work.
 ## Test
 
 ```bash
-python test_bc.py          # headless — prints triangle/quad counts
-python test_bc.py --gui    # opens result in gmsh GUI
+python3 test_bc.py          # headless — prints triangle/quad counts
+python3 test_bc.py --gui    # opens result in gmsh GUI
 ```
 
-Expected output (H1=0.012, RATIO=1.20, N_LAY=6, W0_MAX=0.06):
-- ~289 quadrangles (BL + BC structured quads)
-- ~2453 triangles (far-field Delaunay)
+Expected output (H1=0.012, RATIO=1.20, N_LAY=6, N_COLS=8, W0_MAX=0.06):
+- 354 quadrangles (full-profile BC structured quads, including axis column)
+- 2173 triangles (far-field Delaunay)
 
 ## Bug fixes (branch `snap-remove`)
 
@@ -189,13 +189,13 @@ mv.erase(std::remove_if(mv.begin(), mv.end(),
     [&](MVertex *v){ return protected_verts.count(v); }), mv.end());
 ```
 
-### 2. Collinear axis vertex prevents edge recovery (`Field.cpp`)
+### 2. Axis column as structured quads (`Field.cpp`)
 
-**Root cause:** At the nose (theta=0°) the BC outer column falls exactly on y=0. The vertex at `(2+h1, 0)` is collinear between `p_nose=(2,0)` and the nearest `l_ax` mesh vertex `(2.012, 0)`. Constrained Delaunay `recover_edge` fails fatally for the `l_ax` segment: a foreign vertex lies on the edge.
+**Root cause (original):** At the nose (theta=0°) the BC outer column falls exactly on y=0. Collinear vertices between `p_nose` and the nearest axis mesh vertex prevented constrained-Delaunay edge recovery.
 
-**Fix:** `N = baseVerts.size() - 2 - bcStart` (skip last column). The short `arc_bc` gap near the nose is filled by one or two triangles in the inner Delaunay.
+**Fix (current):** The axis GEdge's 1D mesh is subdivided to split around the new column's outer vertices (`grid[N][k]`). The XOR bedge mechanism then cancels all shared edges, giving a clean closed boundary for the inner Delaunay. `grid[N][k]` are classified on `gf` (not on `axisEdge`) so `reparamMeshVertexOnFace` returns their correct (x,y) position rather than the farfield endpoint. Old axis interior vertices in the replaced range are deleted from `axisEdge->mesh_vertices`.
 
 ## Known limitations
 
 - `buildForFace` only processes `curvesList_.front()` (first curve). Multi-curve support not implemented.
-- The axis column exclusion is implicit (always drops the last column). A future improvement could detect whether the endpoint is actually on y=0 and only skip when necessary.
+- Axis column inclusion requires a valid `axisEdge` (GEdge adjacent to axisGV lying on y=0). If not found, falls back to old behaviour: N = size-2, last column skipped.

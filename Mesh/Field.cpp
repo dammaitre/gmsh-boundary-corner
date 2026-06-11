@@ -2998,34 +2998,34 @@ std::string BoundaryCornerField::getDescription()
 
 BoundaryCornerField::BoundaryCornerField()
   : h1_(1e-3), ratio_(1.15), nbLayers_(30),
-    w0max_(0.1), lBL_(-1.0), omega_(1.0),
+    nbCornerColumns_(10), w0max_(0.1), lBL_(-1.0), omega_(1.0),
     lBLeff_(1e-3), hTotal_(0.0)
 {
-  axisPoint_[0]  = axisPoint_[1]  = 0.0;
-  startPoint_[0] = startPoint_[1] = 0.0;
+  axisPoint_[0] = axisPoint_[1] = 0.0;
 
   options["CurvesList"] = new FieldOptionList(
     curvesList_, "Tags of the profile curves", &update_needed);
   options["AxisPoint"] = new FieldOptionListDouble(
     axisPointList_, "Critical point on the axis [x_a, 0.0]", &update_needed);
-  options["StartPoint"] = new FieldOptionListDouble(
-    startPointList_, "Start point of the BC zone on the profile [x_s, y_s]",
-    &update_needed);
   options["Size"] = new FieldOptionDouble(
     h1_, "Height of the first BL row", &update_needed);
   options["Ratio"] = new FieldOptionDouble(
     ratio_, "Geometric growth ratio between successive BL rows", &update_needed);
   options["NbLayers"] = new FieldOptionInt(
     nbLayers_, "Number of BL rows", &update_needed);
+  options["NbCornerColumns"] = new FieldOptionInt(
+    nbCornerColumns_,
+    "Number of arc-length-compressed columns from AxisPoint outward.  "
+    "Beyond these columns the column arc-length is held constant at MaxColumnWidth.",
+    &update_needed);
   options["MaxColumnWidth"] = new FieldOptionDouble(
     w0max_,
-    "Maximum column arc-length (first column at StartPoint, matching the adjacent "
-    "BL tangential cell size).  Number of columns is derived automatically to span "
-    "the StartPoint-to-AxisPoint arc.",
+    "Column arc-length in the constant-width section (farthest from AxisPoint) "
+    "and maximum arc-length of the compressed corner columns.",
     &update_needed);
   options["ColWidth"] = new FieldOptionDouble(
     lBL_,
-    "Arc-length of the last BC column at AxisPoint (corner cell, delta_1).  "
+    "Arc-length of the innermost BC column at AxisPoint (corner cell).  "
     "-1 = use Size (h1)",
     &update_needed);
   options["Omega"] = new FieldOptionDouble(
@@ -3041,11 +3041,6 @@ void BoundaryCornerField::computeParameters()
     auto it = axisPointList_.begin();
     axisPoint_[0] = (it != axisPointList_.end()) ? *it++ : 0.0;
     axisPoint_[1] = (it != axisPointList_.end()) ? *it   : 0.0;
-  }
-  {
-    auto it = startPointList_.begin();
-    startPoint_[0] = (it != startPointList_.end()) ? *it++ : 0.0;
-    startPoint_[1] = (it != startPointList_.end()) ? *it   : 0.0;
   }
 
   if(std::abs(ratio_ - 1.0) < 1e-10)
@@ -3078,7 +3073,8 @@ bool BoundaryCornerField::buildForFace(
   const std::set<MVertex *> &blVerts,
   std::vector<MQuadrangle *> &bcQuads,
   std::set<MVertex *> &verts,
-  std::vector<MLine *> &outerLines)
+  std::vector<MLine *> &outerLines,
+  std::map<MVertex *, std::vector<MVertex *>> &junctionMap)
 {
   computeParameters();
   if(curvesList_.empty() || nbLayers_ < 1) return false;
@@ -3104,16 +3100,15 @@ bool BoundaryCornerField::buildForFace(
     return false;
   }
 
-  // Ensure baseVerts runs from startPoint→axisPoint; reverse if necessary.
-  // Use squared distance to identify which end is which.
+  // Ensure baseVerts runs from profile-start → axisPoint; reverse if necessary.
   auto sqDist = [](MVertex *v, double x, double y) {
     double dx = v->x() - x, dy = v->y() - y;
     return dx*dx + dy*dy;
   };
   MVertex *vFront = baseVerts.front(), *vBack = baseVerts.back();
-  double dFrontS = sqDist(vFront, startPoint_[0], startPoint_[1]);
-  double dBackS  = sqDist(vBack,  startPoint_[0], startPoint_[1]);
-  if(dBackS < dFrontS)
+  double dFrontA = sqDist(vFront, axisPoint_[0], axisPoint_[1]);
+  double dBackA  = sqDist(vBack,  axisPoint_[0], axisPoint_[1]);
+  if(dFrontA < dBackA)  // front is closer to axis → reverse so axis end is at back
     std::reverse(baseVerts.begin(), baseVerts.end());
 
   // Detect how many leading arc_bc segments are consumed by BL.
@@ -3134,13 +3129,28 @@ bool BoundaryCornerField::buildForFace(
     }
   }
 
-  // Exclude the very last column at the axis/nose endpoint.  At that point the
-  // outward normal is parallel to the axis, so BC outer vertices land exactly on
-  // the axis line (y=0).  Those collinear vertices sit between p_nose and the
-  // adjacent l_ax mesh vertex, preventing constrained-Delaunay edge recovery.
-  // Skipping the last column leaves a short arc_bc segment near the nose that
-  // the inner mesher's Delaunay will fill with a small triangle.
-  int N = (int)baseVerts.size() - 2 - bcStart;  // BC columns (segments not consumed by BL)
+  // Find the GVertex and GEdge at the axis end (y=0) so the last column can be
+  // included as quads.  The axis outer vertices land on y=0; we classify them on
+  // the axis GEdge and subdivide its 1D mesh so the XOR bedges cancel cleanly.
+  GVertex *axisGV = nullptr;
+  for(auto *gv : {ge->getBeginVertex(), ge->getEndVertex()}) {
+    if(!gv || gv->mesh_vertices.empty()) continue;
+    if(gv->mesh_vertices[0] == baseVerts.back()) { axisGV = gv; break; }
+  }
+  GEdge *axisEdge = nullptr;
+  if(axisGV) {
+    for(auto *adj : axisGV->edges()) {
+      if(adj == ge) continue;
+      GVertex *other = (adj->getBeginVertex() == axisGV) ? adj->getEndVertex()
+                                                          : adj->getBeginVertex();
+      if(other && std::abs(other->y()) < 1e-10) { axisEdge = adj; break; }
+    }
+  }
+  // With a known axis edge we include the last column (axis column) as quads.
+  // Without it fall back to the old behaviour: skip the last column and let
+  // Delaunay fill the small gap with a triangle.
+  int N = (axisEdge) ? (int)baseVerts.size() - 1 - bcStart
+                     : (int)baseVerts.size() - 2 - bcStart;
   if(N < 1) {
     Msg::Warning("BoundaryCorner: no arc_bc segments remain after BL fan for GEdge %d", ge->tag());
     return false;
@@ -3160,10 +3170,11 @@ bool BoundaryCornerField::buildForFace(
   }
 
   // Build grid[i][k]: i indexes columns starting from baseVerts[bcStart].
-  // When blOuterAtJunction is found, column 0 is replaced by a stitch quad so
-  // intermediate grid[0][1..nbLayers_-1] vertices are never referenced; skip them.
-  const bool useStitch = (blOuterAtJunction != nullptr) &&
-                         (bcStart + 1 < (int)baseVerts.size());
+  // For the last column (i==N, axis column) outer vertices lie on y=0 and are
+  // classified on axisEdge so they participate in the edge's 1D mesh.
+  // For the first column (i==0, non-axis end), reuse outer vertices from a
+  // previously processed BC field if that field already built the same column
+  // (junction sharing: two BC arcs meeting at a common GVertex).
   std::vector<std::vector<MVertex *>> grid(N + 1,
     std::vector<MVertex *>(nbLayers_ + 1, nullptr));
 
@@ -3173,19 +3184,101 @@ bool BoundaryCornerField::buildForFace(
     double ti = arcLengthToParam(ge, bv->x(), bv->y());
     SPoint2 ni = normalAtPoint(ge, ti);
     double bx = bv->x(), by = bv->y();
+    GEntity *outerEnt = gf;
+
+    // At the non-axis end (i==0), reuse outer vertices if another BC field
+    // already owns this junction base vertex — avoids duplicate walls in XOR.
+    if(i == 0) {
+      auto jit = junctionMap.find(bv);
+      if(jit != junctionMap.end() &&
+         (int)jit->second.size() == nbLayers_) {
+        for(int k = 1; k <= nbLayers_; k++)
+          grid[0][k] = jit->second[k - 1];
+        continue;
+      }
+    }
+
     for(int k = 1; k <= nbLayers_; k++) {
       if(useStitch && i == 0 && k < nbLayers_)
         continue;  // intermediate col-0 vertices unused in stitch path
       double hk = (std::abs(ratio_ - 1.0) < 1e-10)
                   ? h1_ * omega_ * k
                   : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
-      grid[i][k] = new MVertex(bx + ni.x() * hk, by + ni.y() * hk, 0.0, gf);
+      grid[i][k] = new MVertex(bx + ni.x() * hk, by + ni.y() * hk, 0.0, outerEnt);
+    }
+
+    // Register the non-axis end column so a subsequent BC field can share it.
+    if(i == 0) {
+      std::vector<MVertex *> col(nbLayers_);
+      for(int k = 1; k <= nbLayers_; k++) col[k - 1] = grid[0][k];
+      junctionMap[bv] = std::move(col);
     }
   }
 
-  // Collect BC vertices: inner (k=1..nbLayers_-1) and outer (k=nbLayers_).
-  // Skip nullptr entries (col-0 intermediate vertices omitted in stitch path).
-  // BL outer vertices are already tracked via blVerts; exclude them here.
+  // Subdivide the axis GEdge's 1D mesh to include grid[N][1..nbLayers_].
+  // grid[N][k] lie on y=0 from axisVert to grid[N][nbLayers_]; they may span
+  // several existing axis MLines.  We remove every axis MLine that falls in the
+  // range [xNose, xOuter] plus the one that straddles xOuter, then insert the
+  // new chain so the XOR bedges from the axis edge and the last-column right
+  // side cancel cleanly.
+  if(axisEdge) {
+    MVertex *axisVert = baseVerts.back();
+    double xNose  = axisVert->x();
+    double xOuter = grid[N][nbLayers_]->x();
+    // xOuter > xNose for a downstream (nose) axis, xOuter < xNose for an
+    // upstream (tail) axis — use min/max so both cases find the right lines.
+    double xMin = std::min(xNose, xOuter);
+    double xMax = std::max(xNose, xOuter);
+
+    MVertex *vReconnect = nullptr;
+    std::vector<int> toRemove;
+    for(int li = 0; li < (int)axisEdge->lines.size(); li++) {
+      MLine *ml   = axisEdge->lines[li];
+      MVertex *va = ml->getVertex(0), *vb = ml->getVertex(1);
+      bool aIn = (va->x() >= xMin - 1e-14 && va->x() <= xMax + 1e-14);
+      bool bIn = (vb->x() >= xMin - 1e-14 && vb->x() <= xMax + 1e-14);
+      if(aIn && bIn) {
+        toRemove.push_back(li);
+      } else if(aIn != bIn) {
+        // Straddle: one vertex inside range, one outside (beyond the outer column)
+        toRemove.push_back(li);
+        vReconnect = aIn ? vb : va;
+      }
+    }
+
+    if(vReconnect && !toRemove.empty()) {
+      int insertPos = toRemove.front();
+      for(int i = (int)toRemove.size() - 1; i >= 0; i--) {
+        delete axisEdge->lines[toRemove[i]];
+        axisEdge->lines.erase(axisEdge->lines.begin() + toRemove[i]);
+      }
+
+      // Insert chain running toward axisVert (matching the axis edge direction):
+      // vReconnect → grid[N][nbLayers_] → ... → grid[N][1] → axisVert
+      axisEdge->lines.insert(axisEdge->lines.begin() + insertPos,
+                             new MLine(vReconnect, grid[N][nbLayers_]));
+      for(int k = nbLayers_ - 1; k >= 1; k--)
+        axisEdge->lines.insert(axisEdge->lines.begin() + ++insertPos,
+                               new MLine(grid[N][k + 1], grid[N][k]));
+      axisEdge->lines.insert(axisEdge->lines.begin() + ++insertPos,
+                             new MLine(grid[N][1], axisVert));
+
+      // Strip and delete the old interior vertices whose MLines we removed.
+      // grid[N][k] are classified on gf (not axisEdge) so they are NOT added here.
+      auto &mv = axisEdge->mesh_vertices;
+      auto rmBegin = std::remove_if(mv.begin(), mv.end(),
+        [xMin, xMax](MVertex *v) {
+          return v->x() >= xMin - 1e-14 && v->x() <= xMax + 1e-14;
+        });
+      for(auto vit = rmBegin; vit != mv.end(); ++vit) delete *vit;
+      mv.erase(rmBegin, mv.end());
+    } else {
+      Msg::Warning("BoundaryCorner: failed to subdivide axis GEdge %d near axis point",
+                   axisEdge->tag());
+    }
+  }
+
+  // Collect all BC face-interior vertices, including the axis column.
   for(int i = 0; i <= N; i++)
     for(int k = 1; k <= nbLayers_; k++)
       if(grid[i][k] && !blVerts.count(grid[i][k]))
@@ -3220,8 +3313,8 @@ bool BoundaryCornerField::buildForFace(
           grid[i + 1][k + 1], grid[i][k + 1]));
   }
 
-  Msg::Info("BoundaryCorner (pre-mesh): %d columns x %d layers = %d quads (face %d)",
-            N, nbLayers_, N * nbLayers_, gf->tag());
+  Msg::Warning("BoundaryCorner (pre-mesh): %d columns x %d layers = %d quads (face %d), axisEdge=%d",
+            N, nbLayers_, N * nbLayers_, gf->tag(), axisEdge ? axisEdge->tag() : -1);
   return true;
 }
 
@@ -3247,11 +3340,32 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
   }
   if(!gf) return;
 
-  // --- Curve parameters at start and axis points ---
-  double t_start = arcLengthToParam(ge, startPoint_[0], startPoint_[1]);
-  double t_end   = arcLengthToParam(ge, axisPoint_[0],  axisPoint_[1]);
+  // t_end at axisPoint; t_start at the non-axis GVertex endpoint
+  double t_end = arcLengthToParam(ge, axisPoint_[0], axisPoint_[1]);
 
-  // --- Actual arc length S to C (numerical integration of |firstDer|) ---
+  GVertex *gvBegin = ge->getBeginVertex();
+  GVertex *gvEnd   = ge->getEndVertex();
+  auto sqd = [&](GVertex *gv) -> double {
+    if(!gv) return 1e30;
+    double dx = gv->x() - axisPoint_[0], dy = gv->y() - axisPoint_[1];
+    return dx*dx + dy*dy;
+  };
+  SPoint2 ptStart;
+  double t_start;
+  if(sqd(gvEnd) > sqd(gvBegin) && gvEnd) {
+    ptStart = SPoint2(gvEnd->x(), gvEnd->y());
+    t_start = arcLengthToParam(ge, gvEnd->x(), gvEnd->y());
+  } else if(gvBegin) {
+    ptStart = SPoint2(gvBegin->x(), gvBegin->y());
+    t_start = arcLengthToParam(ge, gvBegin->x(), gvBegin->y());
+  } else {
+    t_start = ge->parBounds(0).low();
+    GPoint gp0 = ge->point(t_start);
+    ptStart = SPoint2(gp0.x(), gp0.y());
+  }
+  double tSign = (t_end >= t_start) ? 1.0 : -1.0;
+
+  // --- Full profile arc length (numerical integration of |firstDer|) ---
   double S_total = 0.0;
   {
     const int nInt = 200;
@@ -3260,54 +3374,52 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
       S_total += ge->firstDer(t_start + (i + 0.5) * dti).norm() * std::abs(dti);
   }
   if(S_total < 1e-14) {
-    Msg::Error("BoundaryCorner: arc length from StartPoint to AxisPoint is zero");
+    Msg::Error("BoundaryCorner: full profile arc length is zero");
     return;
   }
 
-  // --- Derive N: smallest integer such that the geometric series spans S_total ---
-  // Series: w0_max, w0_max*eps, ..., w0_max*eps^(N-1)  with eps = (lBLeff_/w0max_)^(1/(N-1))
-  // sum(N) = w0_max * (1 - eps^N) / (1 - eps)
-  int N;
+  // --- Compressed section: nbCornerColumns_ columns from axisPoint outward ---
+  int N_corner = std::max(1, nbCornerColumns_);
   double eps;
-  const double q = lBLeff_ / w0max_;  // ratio last/first column (<1 for compression)
-
-  if(q >= 1.0 - 1e-10 || w0max_ >= S_total) {
-    // Uniform columns (no compression) or arc shorter than one column
-    N   = std::max(1, (int)std::ceil(S_total / w0max_));
+  const double q = lBLeff_ / w0max_;
+  if(N_corner < 2 || q >= 1.0 - 1e-10)
     eps = 1.0;
-  }
-  else {
-    // Large-N approximation: N ≈ 1 + S_total*ln(1/q) / (w0max_*(1-q))
-    double N_est = 1.0 + S_total * std::log(1.0 / q) / (w0max_ * (1.0 - q));
-    N = std::max(2, (int)std::ceil(N_est));
+  else
+    eps = std::pow(q, 1.0 / (N_corner - 1));
 
-    auto series_sum = [&](int n) -> double {
-      double e = std::pow(q, 1.0 / (n - 1));
-      return (std::abs(e - 1.0) < 1e-12) ? w0max_ * n
-             : w0max_ * (1.0 - std::pow(e, n)) / (1.0 - e);
-    };
+  double S_corner_nom = (std::abs(eps - 1.0) < 1e-10)
+      ? w0max_ * N_corner
+      : w0max_ * (1.0 - std::pow(eps, N_corner)) / (1.0 - eps);
 
-    while(series_sum(N) < S_total) ++N;          // guarantee coverage
-    while(N > 2 && series_sum(N - 1) >= S_total) --N;  // trim excess
+  // --- Constant-width section: remaining arc covered with w0max_ columns ---
+  double S_rem = S_total - S_corner_nom;
+  int N_constant = (S_rem > 1e-14) ? (int)std::ceil(S_rem / w0max_) : 0;
+  int N = N_constant + N_corner;
 
-    eps = std::pow(q, 1.0 / (N - 1));
-  }
+  // Scale compressed widths to span S_total - N_constant*w0max_ exactly
+  double S_corner_actual = S_total - (double)N_constant * w0max_;
+  if(S_corner_actual < 1e-14) S_corner_actual = S_total / N_corner;
+  double w0_corner = (std::abs(eps - 1.0) < 1e-10)
+      ? S_corner_actual / N_corner
+      : S_corner_actual * (1.0 - eps) / (1.0 - std::pow(eps, N_corner));
 
-  // Scale the series to span exactly S_total (preserves compression ratio eps,
-  // actual first column ≤ w0max_).
-  double w0 = (std::abs(eps - 1.0) < 1e-10)
-              ? S_total / N
-              : S_total * (1.0 - eps) / (1.0 - std::pow(eps, N));
-
-  // --- Build profile points (N+1 nodes from startPoint to axisPoint) ---
+  // --- Build profile points: N_constant uniform columns then N_corner compressed ---
   std::vector<SPoint2> prof(N + 1);
-  prof[0] = SPoint2(startPoint_[0], startPoint_[1]);
-  for(int i = 1; i < N; i++) {
-    double Li    = w0 * std::pow(eps, i - 1);
+  prof[0] = ptStart;
+  for(int i = 1; i <= N; i++) {
+    // constant zone: columns 1..N_constant (indices 0..N_constant-1 from start, widest first)
+    // compressed zone: columns N_constant+1..N (indices 0..N_corner-1 from constant end, widest first)
+    double Li;
+    if(i <= N_constant)
+      Li = w0max_;
+    else
+      Li = w0_corner * std::pow(eps, i - N_constant - 1);
+
     double t0    = arcLengthToParam(ge, prof[i - 1].x(), prof[i - 1].y());
     double speed = ge->firstDer(t0).norm();
     double dt    = (speed > 1e-14) ? Li / speed : 0.0;
-    double t1    = std::min(t0 + dt, t_end);
+    double t1    = (tSign > 0) ? std::min(t0 + tSign * dt, t_end)
+                               : std::max(t0 + tSign * dt, t_end);
     GPoint gp    = ge->point(t1);
     prof[i]      = SPoint2(gp.x(), gp.y());
   }
@@ -3399,7 +3511,7 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
     gf->quadrangles = keepQ;
   }
 
-  // --- Merge grid[0][k] with BL outer vertices at StartPoint (conforming interface) ---
+  // --- Merge grid[0][k] with adjacent BL outer vertices (conforming interface) ---
   // The BL last column's right-side outer vertices are at the same positions as
   // grid[0][1..nbLayers_]. Reusing those vertex objects makes the BL/BC interface
   // conforming. BL outer vertices may be on a BL-outer GEdge (dim=1), not the GFace,
@@ -3542,10 +3654,22 @@ double BoundaryCornerField::operator()(double x, double y, double z,
   double dx   = x - axisPoint_[0];
   double dy   = y - axisPoint_[1];
   double dist = std::sqrt(dx * dx + dy * dy);
-  double zone = hTotal_ * 5.0;
-  // at C (dist=0): corner cell = lBLeff_ (small); at zone edge: w0max_ (large)
-  if(zone > 0.0 && dist < zone)
-    return lBLeff_ + (w0max_ - lBLeff_) * dist / zone;
+
+  // Arc-length of the compressed corner section (used as the zone radius)
+  int nc = std::max(1, nbCornerColumns_);
+  double eps_op;
+  const double q_op = (w0max_ > 1e-100) ? lBLeff_ / w0max_ : 1.0;
+  if(nc < 2 || q_op >= 1.0 - 1e-10)
+    eps_op = 1.0;
+  else
+    eps_op = std::pow(q_op, 1.0 / (nc - 1));
+  double S_corner = (std::abs(eps_op - 1.0) < 1e-10)
+      ? w0max_ * nc
+      : w0max_ * (1.0 - std::pow(eps_op, nc)) / (1.0 - eps_op);
+
+  // Within the compressed zone: interpolate from lBLeff_ (at corner) to w0max_
+  if(S_corner > 0.0 && dist < S_corner)
+    return lBLeff_ + (w0max_ - lBLeff_) * dist / S_corner;
   return 1e22;
 }
 

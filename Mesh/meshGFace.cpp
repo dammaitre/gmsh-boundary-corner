@@ -1039,13 +1039,15 @@ static void modifyInitialMeshForBoundaryCorners(
 {
   FieldManager *fields = gf->model()->getFields();
   std::vector<MLine *> outerLines;
+  std::map<MVertex *, std::vector<MVertex *>> junctionMap;
 
   bool anyApplied = false;
   for(auto it = fields->begin(); it != fields->end(); ++it) {
     BoundaryCornerField *bcf =
       dynamic_cast<BoundaryCornerField *>(it->second);
     if(!bcf) continue;
-    if(bcf->buildForFace(gf, blQuads, blVerts, bcQuads, verts, outerLines))
+    if(bcf->buildForFace(gf, blQuads, blVerts, bcQuads, verts, outerLines,
+                         junctionMap))
       anyApplied = true;
   }
   if(!anyApplied || outerLines.empty()) {
@@ -1348,10 +1350,6 @@ bool meshGenerator(GFace *gf, int RECUR_ITER, bool repairSelfIntersecting1dMesh,
     Msg::Error("The 1D mesh seems not to be forming a closed loop (%d boundary "
                "nodes are considered once)",
                boundary.size());
-    for(std::set<MVertex *, MVertexLessThanNum>::iterator it = boundary.begin();
-        it != boundary.end(); it++){
-      Msg::Debug("Remaining node %lu", (*it)->getNum());
-    }
     gf->meshStatistics.status = GFace::FAILED;
     return false;
   }
