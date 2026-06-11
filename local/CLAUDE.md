@@ -122,8 +122,10 @@ Called from `modifyInitialMeshForBoundaryCorners` (meshGFace.cpp), itself called
 5. Build `grid[i][k]`: base at `baseVerts[bcStart+i]`, outer rows at `base + k*h_k * normal`.
 6. Fill `bcQuads` (N×nbLayers_ quads), `verts` (BC inner+outer vertices), `outerLines` (outer-row MLines).
 
-**Axis column exclusion (N = size-2 instead of size-1):**
-At `theta=0°` the outward normal is `+x`, so BC outer vertices land at `(2+h_k, 0)` — exactly on the axis (y=0). These collinear vertices sit between `p_nose` and the nearest `l_ax` mesh vertex, preventing constrained-Delaunay edge recovery. Excluding the last column leaves a short `arc_bc` gap that the inner Delaunay fills with one or two small triangles.
+**Axis column included (N = size-1 instead of size-2):**
+The last column at `theta=0°` is now included as structured quads. Its outer vertices land on `y=0` at `(x_C + h_k, 0)`. To make the XOR bedges close correctly, the axis GEdge's 1D mesh (`axisEdge->lines`) is subdivided to replace the MLines that would overlap the new column with a chain: `vReconnect → grid[N][nbLayers_] → ... → grid[N][1] → axisVert`. The XOR then cancels all shared edges between the BC quads and the new axis chain, leaving a clean closed bedge loop.
+
+**Key classification rule:** `grid[N][k]` (axis-column outer vertices) are classified on `gf` (dim=2), NOT on `axisEdge`. This is required so `reparamMeshVertexOnFace` can compute correct (x,y) parametric coordinates for the inner BDS Delaunay mesher. Classifying them on `axisEdge` causes `reparamOnFace(t=0)` to return the farfield endpoint instead of the actual vertex position, breaking edge recovery.
 
 ### `modifyInitialMeshForBoundaryCorners` (Mesh/meshGFace.cpp)
 
@@ -158,8 +160,8 @@ python3 test_bc.py --gui    # opens result in gmsh GUI
 ```
 
 Expected output (H1=0.012, RATIO=1.20, N_LAY=6, N_COLS=8, W0_MAX=0.06):
-- ~348 quadrangles (full-profile BC structured quads)
-- ~2192 triangles (far-field Delaunay)
+- 354 quadrangles (full-profile BC structured quads, including axis column)
+- 2173 triangles (far-field Delaunay)
 
 ## Bug fixes (branch `snap-remove`)
 
@@ -187,13 +189,13 @@ mv.erase(std::remove_if(mv.begin(), mv.end(),
     [&](MVertex *v){ return protected_verts.count(v); }), mv.end());
 ```
 
-### 2. Collinear axis vertex prevents edge recovery (`Field.cpp`)
+### 2. Axis column as structured quads (`Field.cpp`)
 
-**Root cause:** At the nose (theta=0°) the BC outer column falls exactly on y=0. The vertex at `(2+h1, 0)` is collinear between `p_nose=(2,0)` and the nearest `l_ax` mesh vertex `(2.012, 0)`. Constrained Delaunay `recover_edge` fails fatally for the `l_ax` segment: a foreign vertex lies on the edge.
+**Root cause (original):** At the nose (theta=0°) the BC outer column falls exactly on y=0. Collinear vertices between `p_nose` and the nearest axis mesh vertex prevented constrained-Delaunay edge recovery.
 
-**Fix:** `N = baseVerts.size() - 2 - bcStart` (skip last column). The short `arc_bc` gap near the nose is filled by one or two triangles in the inner Delaunay.
+**Fix (current):** The axis GEdge's 1D mesh is subdivided to split around the new column's outer vertices (`grid[N][k]`). The XOR bedge mechanism then cancels all shared edges, giving a clean closed boundary for the inner Delaunay. `grid[N][k]` are classified on `gf` (not on `axisEdge`) so `reparamMeshVertexOnFace` returns their correct (x,y) position rather than the farfield endpoint. Old axis interior vertices in the replaced range are deleted from `axisEdge->mesh_vertices`.
 
 ## Known limitations
 
 - `buildForFace` only processes `curvesList_.front()` (first curve). Multi-curve support not implemented.
-- The axis column exclusion is implicit (always drops the last column). A future improvement could detect whether the endpoint is actually on y=0 and only skip when necessary.
+- Axis column inclusion requires a valid `axisEdge` (GEdge adjacent to axisGV lying on y=0). If not found, falls back to old behaviour: N = size-2, last column skipped.

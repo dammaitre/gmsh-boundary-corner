@@ -3128,19 +3128,36 @@ bool BoundaryCornerField::buildForFace(
     }
   }
 
-  // Exclude the very last column at the axis/nose endpoint.  At that point the
-  // outward normal is parallel to the axis, so BC outer vertices land exactly on
-  // the axis line (y=0).  Those collinear vertices sit between p_nose and the
-  // adjacent l_ax mesh vertex, preventing constrained-Delaunay edge recovery.
-  // Skipping the last column leaves a short arc_bc segment near the nose that
-  // the inner mesher's Delaunay will fill with a small triangle.
-  int N = (int)baseVerts.size() - 2 - bcStart;  // BC columns (segments not consumed by BL)
+  // Find the GVertex and GEdge at the axis end (y=0) so the last column can be
+  // included as quads.  The axis outer vertices land on y=0; we classify them on
+  // the axis GEdge and subdivide its 1D mesh so the XOR bedges cancel cleanly.
+  GVertex *axisGV = nullptr;
+  for(auto *gv : {ge->getBeginVertex(), ge->getEndVertex()}) {
+    if(!gv || gv->mesh_vertices.empty()) continue;
+    if(gv->mesh_vertices[0] == baseVerts.back()) { axisGV = gv; break; }
+  }
+  GEdge *axisEdge = nullptr;
+  if(axisGV) {
+    for(auto *adj : axisGV->edges()) {
+      if(adj == ge) continue;
+      GVertex *other = (adj->getBeginVertex() == axisGV) ? adj->getEndVertex()
+                                                          : adj->getBeginVertex();
+      if(other && std::abs(other->y()) < 1e-10) { axisEdge = adj; break; }
+    }
+  }
+  // With a known axis edge we include the last column (axis column) as quads.
+  // Without it fall back to the old behaviour: skip the last column and let
+  // Delaunay fill the small gap with a triangle.
+  int N = (axisEdge) ? (int)baseVerts.size() - 1 - bcStart
+                     : (int)baseVerts.size() - 2 - bcStart;
   if(N < 1) {
     Msg::Warning("BoundaryCorner: no arc_bc segments remain after BL fan for GEdge %d", ge->tag());
     return false;
   }
 
   // Build grid[i][k]: i indexes columns starting from baseVerts[bcStart].
+  // For the last column (i==N, axis column) outer vertices lie on y=0 and are
+  // classified on axisEdge so they participate in the edge's 1D mesh.
   std::vector<std::vector<MVertex *>> grid(N + 1,
     std::vector<MVertex *>(nbLayers_ + 1, nullptr));
 
@@ -3150,15 +3167,75 @@ bool BoundaryCornerField::buildForFace(
     double ti = arcLengthToParam(ge, bv->x(), bv->y());
     SPoint2 ni = normalAtPoint(ge, ti);
     double bx = bv->x(), by = bv->y();
+    GEntity *outerEnt = gf;
     for(int k = 1; k <= nbLayers_; k++) {
       double hk = (std::abs(ratio_ - 1.0) < 1e-10)
                   ? h1_ * omega_ * k
                   : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
-      grid[i][k] = new MVertex(bx + ni.x() * hk, by + ni.y() * hk, 0.0, gf);
+      grid[i][k] = new MVertex(bx + ni.x() * hk, by + ni.y() * hk, 0.0, outerEnt);
     }
   }
-  // Collect inner BC vertices (k=1..nbLayers_-1) that are not BL outer vertices.
-  // Outer BC vertices (k=nbLayers_) reach gf->mesh_vertices via meshGenerator.
+
+  // Subdivide the axis GEdge's 1D mesh to include grid[N][1..nbLayers_].
+  // grid[N][k] lie on y=0 from axisVert to grid[N][nbLayers_]; they may span
+  // several existing axis MLines.  We remove every axis MLine that falls in the
+  // range [xNose, xOuter] plus the one that straddles xOuter, then insert the
+  // new chain so the XOR bedges from the axis edge and the last-column right
+  // side cancel cleanly.
+  if(axisEdge) {
+    MVertex *axisVert = baseVerts.back();
+    double xNose  = axisVert->x();
+    double xOuter = grid[N][nbLayers_]->x();
+
+    MVertex *vReconnect = nullptr;
+    std::vector<int> toRemove;
+    for(int li = 0; li < (int)axisEdge->lines.size(); li++) {
+      MLine *ml   = axisEdge->lines[li];
+      MVertex *va = ml->getVertex(0), *vb = ml->getVertex(1);
+      bool aIn = (va->x() >= xNose - 1e-14 && va->x() <= xOuter + 1e-14);
+      bool bIn = (vb->x() >= xNose - 1e-14 && vb->x() <= xOuter + 1e-14);
+      if(aIn && bIn) {
+        toRemove.push_back(li);
+      } else if(aIn != bIn) {
+        // Straddle: one vertex inside range, one outside (beyond xOuter)
+        toRemove.push_back(li);
+        vReconnect = aIn ? vb : va;
+      }
+    }
+
+    if(vReconnect && !toRemove.empty()) {
+      int insertPos = toRemove.front();
+      for(int i = (int)toRemove.size() - 1; i >= 0; i--) {
+        delete axisEdge->lines[toRemove[i]];
+        axisEdge->lines.erase(axisEdge->lines.begin() + toRemove[i]);
+      }
+
+      // Insert chain running toward axisVert (matching the axis edge direction):
+      // vReconnect → grid[N][nbLayers_] → ... → grid[N][1] → axisVert
+      axisEdge->lines.insert(axisEdge->lines.begin() + insertPos,
+                             new MLine(vReconnect, grid[N][nbLayers_]));
+      for(int k = nbLayers_ - 1; k >= 1; k--)
+        axisEdge->lines.insert(axisEdge->lines.begin() + ++insertPos,
+                               new MLine(grid[N][k + 1], grid[N][k]));
+      axisEdge->lines.insert(axisEdge->lines.begin() + ++insertPos,
+                             new MLine(grid[N][1], axisVert));
+
+      // Strip and delete the old interior vertices whose MLines we removed.
+      // grid[N][k] are classified on gf (not axisEdge) so they are NOT added here.
+      auto &mv = axisEdge->mesh_vertices;
+      auto rmBegin = std::remove_if(mv.begin(), mv.end(),
+        [xNose, xOuter](MVertex *v) {
+          return v->x() >= xNose - 1e-14 && v->x() <= xOuter + 1e-14;
+        });
+      for(auto vit = rmBegin; vit != mv.end(); ++vit) delete *vit;
+      mv.erase(rmBegin, mv.end());
+    } else {
+      Msg::Warning("BoundaryCorner: failed to subdivide axis GEdge %d near nose",
+                   axisEdge->tag());
+    }
+  }
+
+  // Collect all BC face-interior vertices, including the axis column.
   for(int i = 0; i <= N; i++)
     for(int k = 1; k <= nbLayers_; k++)
       if(!blVerts.count(grid[i][k])) verts.insert(grid[i][k]);
