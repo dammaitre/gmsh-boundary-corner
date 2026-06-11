@@ -71,7 +71,7 @@ ge->closestPoint(p, t);       // uses virtual overload: GPoint(const SPoint3&, d
 ### `normalAtPoint(ge, t)`
 Returns outward surface normal: rotate tangent 90° CCW → `(-dy/|d|, dx/|d|)`. Correct for CW-parameterized profiles (e.g. ellipse arc from top to nose).
 
-### `buildCornerColumns(gm)` — main mesh injection
+### `buildCornerColumns(gm)` — legacy post-mesh entry (kept for reference, superseded by `buildForFace`)
 
 Called **post-mesh** (from `Generator.cpp` after the 2D mesh loop). Cannot be pre-mesh: `meshGFace()` calls `GFace::deleteMesh()` internally, wiping any pre-injected elements.
 
@@ -98,23 +98,104 @@ return 1e22                                                  otherwise
 ```
 Small size near C, BL-matching size at S.
 
-## Integration points
+## Pre-mesh architecture (current — branch `snap-remove`)
 
-- **`Mesh/Generator.cpp`**: after the `for(GFace*)` 2D mesh loop, iterates `FieldManager` for `BoundaryCornerField` instances and calls `buildCornerColumns(gm)`.
-- **`Mesh/Field.cpp` ~L3295**: `BoundaryCorner` registered in `FieldManager::map_type_name`.
-- **`Context.h`, `Context.cpp`**: `CTX::mesh::boundaryCornerField` int option.
-- **`Options.cpp`, `Options.h`, `DefaultOptions.h`**: `Mesh.BoundaryCornerField` Python-accessible option.
-- **`test_bc.py`**: test script — half-ellipse nose, H1=0.012, RATIO=1.20, N_LAY=6, N_COL=7, DELTA1=0.08. Expects 42 quads.
+The old post-mesh `buildCornerColumns` has been replaced by a **pre-mesh** approach that mirrors how `BoundaryLayerField` works: structured quads are injected *before* the far-field triangulation, so the triangle mesh naturally conforms to the quad outer boundary.
+
+### Key change: `buildForFace` (Mesh/Field.cpp)
+
+```cpp
+bool BoundaryCornerField::buildForFace(
+    GFace *gf,
+    const std::vector<MQuadrangle *> &blQuads,
+    const std::set<MVertex *>        &blVerts,
+    std::vector<MQuadrangle *>       &bcQuads,
+    std::set<MVertex *>              &verts,
+    std::vector<MLine *>             &outerLines);
+```
+
+Called from `modifyInitialMeshForBoundaryCorners` (meshGFace.cpp), itself called inside the outer `meshGenerator` after `modifyInitialMeshForBoundaryLayers`.
+
+**Steps:**
+1. Resolve `ge` (the BC profile edge) from `curvesList_`.
+2. Build `baseVerts` = GVertex-start + `ge->mesh_vertices` + GVertex-end, oriented S→C.
+3. Detect `bcStart`: how many leading `baseVerts[1..k]` are already consumed by BL fan quads (they appear as `j=2/3` vertices of `blQuads`). Start BC columns from `baseVerts[bcStart]`.
+4. Set `N = baseVerts.size() - 2 - bcStart`: exclude the last column at the axis point (see Axis Column below).
+5. Build `grid[i][k]`: base at `baseVerts[bcStart+i]`, outer rows at `base + k*h_k * normal`.
+6. Fill `bcQuads` (N×nbLayers_ quads), `verts` (BC inner+outer vertices), `outerLines` (outer-row MLines).
+
+**Axis column exclusion (N = size-2 instead of size-1):**
+At `theta=0°` the outward normal is `+x`, so BC outer vertices land at `(2+h_k, 0)` — exactly on the axis (y=0). These collinear vertices sit between `p_nose` and the nearest `l_ax` mesh vertex, preventing constrained-Delaunay edge recovery. Excluding the last column leaves a short `arc_bc` gap that the inner Delaunay fills with one or two small triangles.
+
+### `modifyInitialMeshForBoundaryCorners` (Mesh/meshGFace.cpp)
+
+Mirrors `modifyInitialMeshForBoundaryLayers`:
+1. Calls `buildForFace` for every `BoundaryCornerField` registered in `FieldManager`.
+2. Builds `bedges` by XOR: domain edges ⊕ BL quads ⊕ BC quads → the boundary of the remaining-to-triangulate region.
+3. Creates `discreteEdge ne(444445)` with `ne.lines` = bedges MLines.
+4. **Protects BL outer vertices from `deMeshGFace`** (see bug fix below).
+5. Calls `deMeshGFace(gf)` then `meshGenerator(gf, 0, 0, true, false, &hop)` to triangulate the remaining region.
+6. **Strips protected vertices from `gf->mesh_vertices`** so the outer mesher's `verts`/`bcVerts` re-insertion (lines 1907/1912) doesn't double-free them.
+
+### Integration points
+
+- `Mesh/meshGFace.cpp`: `modifyInitialMeshForBoundaryCorners` called at ~L1830 (inside outer `meshGenerator`, after `modifyInitialMeshForBoundaryLayers`).
+- `Mesh/meshGFace.cpp`: outer `meshGenerator` inserts `bcQuads` and `bcVerts` at ~L1911-1913.
+- `Mesh/Field.cpp` ~L3295: `BoundaryCorner` registered in `FieldManager::map_type_name`.
+- `Context.h`, `Options.cpp`, `DefaultOptions.h`: `Mesh.BoundaryCornerField` option (set to the BC field id).
 
 ## Build
 
 ```bash
-cd build && cmake .. -DENABLE_MMG3D=OFF && make -j$(nproc)
+cd build && make -j$(nproc) shared   # Python API (used by test_bc.py)
+cd build && make -j$(nproc) gmsh     # binary (used for --gui)
 ```
 mmg3d disabled: pre-existing linker bug in bundled v4.0, unrelated to this work.
 
-## Known issues / open work
+## Test
 
-- **Non-conforming interface**: quad outer boundary nodes do not generally coincide with surrounding triangle nodes. The fringe snap is a heuristic. Proper fix: enforce quad boundary edges as Delaunay constraints, or pre-declare embedded edges before `meshGFace()`.
-- `buildCornerColumns` only processes `curvesList_.front()` (first curve). Multi-curve support not implemented.
-- **interface gap**: There is currently a column gap in interfaces between BLs & BCs.
+```bash
+python test_bc.py          # headless — prints triangle/quad counts
+python test_bc.py --gui    # opens result in gmsh GUI
+```
+
+Expected output (H1=0.012, RATIO=1.20, N_LAY=6, W0_MAX=0.06):
+- ~289 quadrangles (BL + BC structured quads)
+- ~2453 triangles (far-field Delaunay)
+
+## Bug fixes (branch `snap-remove`)
+
+### 1. Use-after-free of BL outer vertices (`meshGFace.cpp`)
+
+**Root cause:** After the BL inner mesher runs, `MFaceVertex` objects (BL outer row) are in `gf->mesh_vertices`. `modifyInitialMeshForBoundaryCorners` calls `deMeshGFace(gf)` → `GFace::deleteMesh()` → frees every `gf->mesh_vertices[i]`. But `ne.lines` (already built) holds raw pointers to those freed vertices. The 3rd `meshGenerator` then dereferences them → crash/UB.
+
+**Fix:** Before `deMeshGFace`, collect all `ne.lines` vertices with `onWhat()==gf` into `protected_verts` and remove them from `gf->mesh_vertices`. After the inner mesher, `_deleteUnusedVertices` re-adds them (they appear on the triangulation boundary); strip them again so the outer mesher's `verts`/`bcVerts` insert doesn't create duplicates and double-free.
+
+```cpp
+// Protect BL outer vertices from deMeshGFace
+std::set<MVertex *> protected_verts;
+for(auto *l : ne.lines)
+    for(int j = 0; j < 2; j++)
+        if(l->getVertex(j)->onWhat() == gf) protected_verts.insert(l->getVertex(j));
+auto &mv = gf->mesh_vertices;
+mv.erase(std::remove_if(mv.begin(), mv.end(),
+    [&](MVertex *v){ return protected_verts.count(v); }), mv.end());
+
+deMeshGFace kil; kil(gf);
+meshGenerator(gf, 0, 0, true, false, &hop);
+
+// Strip again to avoid duplicate re-insertion
+mv.erase(std::remove_if(mv.begin(), mv.end(),
+    [&](MVertex *v){ return protected_verts.count(v); }), mv.end());
+```
+
+### 2. Collinear axis vertex prevents edge recovery (`Field.cpp`)
+
+**Root cause:** At the nose (theta=0°) the BC outer column falls exactly on y=0. The vertex at `(2+h1, 0)` is collinear between `p_nose=(2,0)` and the nearest `l_ax` mesh vertex `(2.012, 0)`. Constrained Delaunay `recover_edge` fails fatally for the `l_ax` segment: a foreign vertex lies on the edge.
+
+**Fix:** `N = baseVerts.size() - 2 - bcStart` (skip last column). The short `arc_bc` gap near the nose is filled by one or two triangles in the inner Delaunay.
+
+## Known limitations
+
+- `buildForFace` only processes `curvesList_.front()` (first curve). Multi-curve support not implemented.
+- The axis column exclusion is implicit (always drops the last column). A future improvement could detect whether the endpoint is actually on y=0 and only skip when necessary.

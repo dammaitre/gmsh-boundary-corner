@@ -20,8 +20,9 @@ Run:  python test_bc.py           # headless
 
 import sys, os, math, subprocess
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "api"))
-os.environ["GMSH_LIB"] = os.path.join(os.path.dirname(__file__), "build", "libgmsh.so")
+_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_root, "api"))
+os.environ["GMSH_LIB"] = os.path.join(_root, "build", "libgmsh.so")
 
 import gmsh
 
@@ -47,7 +48,7 @@ N_LAY  = 6       # number of BL layers
 W0_MAX = LC_BODY  # max BC column arc-length (at S); N columns derived automatically
 
 gui = "--gui" in sys.argv
-gmsh.initialize(["gmsh"] if gui else ["gmsh", "-nopopup"])
+gmsh.initialize(["gmsh", "-nopopup"])
 gmsh.model.add("test_bc_ellipse")
 
 # ── Points ────────────────────────────────────────────────────────────────────
@@ -132,6 +133,24 @@ gmsh.write(out)
 print(f"\nwritten: {out}")
 
 if gui:
-    subprocess.run(["/usr/bin/gmsh", out])
+    # Prefer the dev build; fall back to the system gmsh if the dev build
+    # has no FLTK GUI support (libfltk1.3-dev not installed).
+    dev_bin = os.path.join(_root, "build", "gmsh")
+    import shutil
+    gmsh_bin = dev_bin if shutil.which(dev_bin) else "gmsh"
+    # Quick check: if the dev binary has no FLTK, it exits immediately.
+    # Detect by checking whether FLTK is listed in its cmake features.
+    import subprocess as _sp
+    cache = os.path.join(_root, "build", "CMakeCache.txt")
+    has_fltk = False
+    if os.path.exists(cache):
+        with open(cache) as _f:
+            for _line in _f:
+                if "FLTK_BASE_LIBRARY_RELEASE:FILEPATH=" in _line and "NOTFOUND" not in _line:
+                    has_fltk = True
+                    break
+    if not has_fltk:
+        gmsh_bin = shutil.which("gmsh") or dev_bin
+    subprocess.run([gmsh_bin, out])
 
 gmsh.finalize()
