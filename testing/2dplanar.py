@@ -44,7 +44,8 @@ W0_MAX = LC_BODY
 DZ = 1.0
 
 # ── Output ────────────────────────────────────────────────────────────────────
-CASE_DIR = "/tmp/ellipse2dplanar_of"
+CASE_DIR = os.path.join(_root, "testing", "ellipse2dplanar_of")
+maxTime  = 5000
 
 # ─────────────────────────────────────────────────────────────────────────────
 gui = "--gui" in sys.argv
@@ -147,7 +148,9 @@ pg(2, [curve_to_lat[l_left]],                             "inlet")
 pg(2, [curve_to_lat[l_ax_r], curve_to_lat[l_ax_l]],      "symmetry")
 
 # ── Write mesh ────────────────────────────────────────────────────────────────
-os.makedirs(CASE_DIR, exist_ok=True)
+if os.path.isdir(CASE_DIR):
+    shutil.rmtree(CASE_DIR)
+os.makedirs(CASE_DIR)
 msh_path = os.path.join(CASE_DIR, "ellipse.msh")
 gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)   # gmshToFoam reads v2
 gmsh.write(msh_path)
@@ -171,30 +174,214 @@ if gui:
 
 gmsh.finalize()
 
-# ── Minimal OpenFOAM case skeleton ────────────────────────────────────────────
+# ── OpenFOAM case skeleton ────────────────────────────────────────────────────
 sys_dir = os.path.join(CASE_DIR, "system")
-os.makedirs(sys_dir, exist_ok=True)
+zero_dir = os.path.join(CASE_DIR, "0")
+const_dir = os.path.join(CASE_DIR, "constant")
+for d in (sys_dir, zero_dir, const_dir):
+    os.makedirs(d)
 
+def _foam_header(cls, location, obj):
+    return (
+        "FoamFile\n{\n"
+        "    version     2.0;\n"
+        "    format      ascii;\n"
+        f"    class       {cls};\n"
+        f"    location    \"{location}\";\n"
+        f"    object      {obj};\n"
+        "}\n\n"
+    )
+
+# controlDict — foamRun / SIMPLE, 1000 iterations
 ctrl_path = os.path.join(sys_dir, "controlDict")
-if not os.path.exists(ctrl_path):
-    with open(ctrl_path, "w") as f:
-        f.write(
-            "FoamFile\n{\n"
-            "    version     2.0;\n"
-            "    format      ascii;\n"
-            "    class       dictionary;\n"
-            "    location    \"system\";\n"
-            "    object      controlDict;\n"
-            "}\n\n"
-            "application     icoFoam;\n"
-            "startFrom       startTime;\n"
-            "startTime       0;\n"
-            "stopAt          endTime;\n"
-            "endTime         1;\n"
-            "deltaT          1;\n"
-            "writeControl    timeStep;\n"
-            "writeInterval   1;\n"
-        )
+with open(ctrl_path, "w") as f:
+    f.write(
+        _foam_header("dictionary", "system", "controlDict") +
+        "application     foamRun;\n"
+        "solver          incompressibleFluid;\n\n"
+        "startFrom       startTime;\n"
+        "startTime       0;\n"
+        "stopAt          endTime;\n"
+        f"endTime         {maxTime};\n"
+        "deltaT          1;\n\n"
+        "writeControl    timeStep;\n"
+        "writeInterval   100;\n\n"
+        "runTimeModifiable yes;\n"
+    )
+
+# k-ω SST freestream values — 1% turbulence intensity, ν_t/ν = 10
+_NU        = 1.5e-5
+_U_INF     = 44.44
+_k_inf     = 1.5 * (_U_INF * 0.01) ** 2
+_omega_inf = _k_inf / (10.0 * _NU)
+
+# fvSchemes
+with open(os.path.join(sys_dir, "fvSchemes"), "w") as f:
+    f.write(
+        _foam_header("dictionary", "system", "fvSchemes") +
+        "ddtSchemes  { default steadyState; }\n\n"
+        "gradSchemes { default Gauss linear; }\n\n"
+        "divSchemes\n{\n"
+        "    default             none;\n"
+        "    div(phi,U)          Gauss linearUpwind grad(U);\n"
+        "    div(phi,k)          Gauss limitedLinear 1;\n"
+        "    div(phi,omega)      Gauss limitedLinear 1;\n"
+        "    div((nuEff*dev(T(grad(U))))) Gauss linear;\n"
+        "}\n\n"
+        "laplacianSchemes { default Gauss linear corrected; }\n\n"
+        "interpolationSchemes { default linear; }\n\n"
+        "snGradSchemes { default corrected; }\n\n"
+        "wallDist { method meshWave; }\n"
+    )
+
+# fvSolution — SIMPLE + k-ω SST
+with open(os.path.join(sys_dir, "fvSolution"), "w") as f:
+    f.write(
+        _foam_header("dictionary", "system", "fvSolution") +
+        "solvers\n{\n"
+        "    p\n    {\n"
+        "        solver          GAMG;\n"
+        "        smoother        GaussSeidel;\n"
+        "        tolerance       1e-6;\n"
+        "        relTol          0.01;\n"
+        "    }\n"
+        "    U\n    {\n"
+        "        solver          smoothSolver;\n"
+        "        smoother        GaussSeidel;\n"
+        "        tolerance       1e-8;\n"
+        "        relTol          0.1;\n"
+        "    }\n"
+        "    \"(k|omega)\"\n    {\n"
+        "        solver          smoothSolver;\n"
+        "        smoother        GaussSeidel;\n"
+        "        tolerance       1e-8;\n"
+        "        relTol          0.1;\n"
+        "    }\n"
+        "}\n\n"
+        "SIMPLE\n{\n"
+        "    nNonOrthogonalCorrectors 1;\n"
+        "    residualControl\n    {\n"
+        "        p       1e-4;\n"
+        "        U       1e-4;\n"
+        "        k       1e-4;\n"
+        "        omega   1e-4;\n"
+        "    }\n"
+        "}\n\n"
+        "relaxationFactors\n{\n"
+        "    fields      { p 0.3; }\n"
+        "    equations   { U 0.7; k 0.7; omega 0.7; }\n"
+        "}\n"
+    )
+
+# momentumTransport — k-ω SST
+with open(os.path.join(const_dir, "momentumTransport"), "w") as f:
+    f.write(
+        _foam_header("dictionary", "constant", "momentumTransport") +
+        "simulationType  RAS;\n\n"
+        "RAS\n{\n"
+        "    model           kOmegaSST;\n"
+        "    turbulence      on;\n"
+        "    printCoeffs     on;\n"
+        "}\n"
+    )
+
+# transportProperties
+with open(os.path.join(const_dir, "transportProperties"), "w") as f:
+    f.write(
+        _foam_header("dictionary", "constant", "transportProperties") +
+        "viscosityModel  constant;\n"
+        "nu              1.5e-5;\n"
+    )
+
+# 0/U — uniform inflow along +x; front/back empty, symmetry on axis
+with open(os.path.join(zero_dir, "U"), "w") as f:
+    f.write(
+        _foam_header("volVectorField", "0", "U") +
+        "dimensions  [0 1 -1 0 0 0 0];\n"
+        "internalField uniform (44.44 0 0);\n\n"
+        "boundaryField\n{\n"
+        "    inlet       { type fixedValue; value uniform (44.44 0 0); }\n"
+        "    outlet      { type zeroGradient; }\n"
+        "    top         { type zeroGradient; }\n"
+        "    body        { type noSlip; }\n"
+        "    symmetry    { type symmetry; }\n"
+        "    symAxis     { type symmetry; }\n"
+        "    front       { type empty; }\n"
+        "    back        { type empty; }\n"
+        "}\n"
+    )
+
+# 0/p — kinematic pressure
+with open(os.path.join(zero_dir, "p"), "w") as f:
+    f.write(
+        _foam_header("volScalarField", "0", "p") +
+        "dimensions  [0 2 -2 0 0 0 0];\n"
+        "internalField uniform 0;\n\n"
+        "boundaryField\n{\n"
+        "    inlet       { type zeroGradient; }\n"
+        "    outlet      { type fixedValue; value uniform 0; }\n"
+        "    top         { type zeroGradient; }\n"
+        "    body        { type zeroGradient; }\n"
+        "    symmetry    { type symmetry; }\n"
+        "    symAxis     { type symmetry; }\n"
+        "    front       { type empty; }\n"
+        "    back        { type empty; }\n"
+        "}\n"
+    )
+
+# 0/k
+with open(os.path.join(zero_dir, "k"), "w") as f:
+    f.write(
+        _foam_header("volScalarField", "0", "k") +
+        "dimensions  [0 2 -2 0 0 0 0];\n"
+        f"internalField uniform {_k_inf:.4g};\n\n"
+        "boundaryField\n{\n"
+        f"    inlet       {{ type fixedValue; value uniform {_k_inf:.4g}; }}\n"
+        "    outlet      { type zeroGradient; }\n"
+        "    top         { type zeroGradient; }\n"
+        "    body        { type kqRWallFunction; value uniform 0; }\n"
+        "    symmetry    { type symmetry; }\n"
+        "    symAxis     { type symmetry; }\n"
+        "    front       { type empty; }\n"
+        "    back        { type empty; }\n"
+        "}\n"
+    )
+
+# 0/omega
+with open(os.path.join(zero_dir, "omega"), "w") as f:
+    f.write(
+        _foam_header("volScalarField", "0", "omega") +
+        "dimensions  [0 0 -1 0 0 0 0];\n"
+        f"internalField uniform {_omega_inf:.4g};\n\n"
+        "boundaryField\n{\n"
+        f"    inlet       {{ type fixedValue; value uniform {_omega_inf:.4g}; }}\n"
+        "    outlet      { type zeroGradient; }\n"
+        "    top         { type zeroGradient; }\n"
+        "    body        { type omegaWallFunction; value uniform 1; }\n"
+        "    symmetry    { type symmetry; }\n"
+        "    symAxis     { type symmetry; }\n"
+        "    front       { type empty; }\n"
+        "    back        { type empty; }\n"
+        "}\n"
+    )
+
+# 0/nut
+with open(os.path.join(zero_dir, "nut"), "w") as f:
+    f.write(
+        _foam_header("volScalarField", "0", "nut") +
+        "dimensions  [0 2 -1 0 0 0 0];\n"
+        "internalField uniform 0;\n\n"
+        "boundaryField\n{\n"
+        "    inlet       { type calculated; value uniform 0; }\n"
+        "    outlet      { type calculated; value uniform 0; }\n"
+        "    top         { type calculated; value uniform 0; }\n"
+        "    body        { type nutkWallFunction; value uniform 0; }\n"
+        "    symmetry    { type symmetry; }\n"
+        "    symAxis     { type symmetry; }\n"
+        "    front       { type empty; }\n"
+        "    back        { type empty; }\n"
+        "}\n"
+    )
 
 # ── gmshToFoam ────────────────────────────────────────────────────────────────
 print("\n── gmshToFoam " + "─" * 60)
@@ -212,6 +399,7 @@ _PATCH_TYPES = {
     "back":     "empty",
     "body":     "wall",
     "symmetry": "symmetry",
+    "symAxis":  "symmetry",
     "inlet":    "patch",
     "outlet":   "patch",
     "top":      "patch",
@@ -221,8 +409,9 @@ def fix_of_boundary(boundary_path):
     with open(boundary_path) as f:
         txt = f.read()
 
-    # BoundaryCorner axis-column cells at y=0 near nose/tail land here
-    txt = re.sub(r'\bdefaultFaces\b', 'symmetry', txt)
+    # BoundaryCorner axis-column cells at y=0 near nose/tail land here;
+    # rename to symAxis to avoid clashing with the existing symmetry patch
+    txt = re.sub(r'\bdefaultFaces\b', 'symAxis', txt)
 
     def _fix_block(m):
         name  = m.group(1)
@@ -249,3 +438,13 @@ fix_of_boundary(boundary_path)
 # ── checkMesh ─────────────────────────────────────────────────────────────────
 print("\n── checkMesh " + "─" * 61)
 subprocess.run(["checkMesh", "-case", CASE_DIR])
+
+# ── foamRun (SIMPLE, 1000 iterations) ────────────────────────────────────────
+print("\n── foamRun " + "─" * 63)
+r = subprocess.run(["foamRun", "-case", CASE_DIR])
+if r.returncode != 0:
+    print("\nfoamRun failed — check OpenFOAM sourcing and log above.")
+    sys.exit(r.returncode)
+
+open(os.path.join(CASE_DIR, "case.foam"), "w").close()
+print("\nDone — results in", CASE_DIR)
