@@ -3212,6 +3212,14 @@ bool BoundaryCornerField::buildForFace(
     SPoint2 ni = normalAtPoint(ge, ti);
     if(flipNormal) ni = SPoint2(-ni.x(), -ni.y());
     double bx = bv->x(), by = bv->y();
+
+    // Axis column: regardless of curve discretisation the normal must be exactly
+    // along x and the base y must be exactly 0 so outer vertices land on y=0.
+    if(i == N && axisEdge) {
+      double signX = (axisPoint_[0] >= 0.0) ? 1.0 : -1.0;
+      ni = SPoint2(signX, 0.0);
+      by = 0.0;
+    }
     GEntity *outerEnt = gf;
 
     // At the non-axis end (i==0), reuse outer vertices if another BC field
