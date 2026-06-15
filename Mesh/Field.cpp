@@ -3181,6 +3181,21 @@ bool BoundaryCornerField::buildForFace(
   const bool useStitch = (blOuterAtJunction != nullptr) &&
                          (bcStart + 1 < (int)baseVerts.size());
 
+  // Determine whether the normals computed via normalAtPoint point outward.
+  // At C=(xC,0) the body meets the axis at 90°; the outward normal must point in
+  // the sign(xC) * x̂ direction.  If normalAtPoint gives the opposite sign at C,
+  // all normals for this field need to be negated.
+  bool flipNormal = false;
+  {
+    double xC = axisPoint_[0];
+    if(std::abs(xC) > 1e-10) {
+      MVertex *axisVert = baseVerts.back();
+      double tC = arcLengthToParam(ge, axisVert->x(), axisVert->y());
+      SPoint2 nC = normalAtPoint(ge, tC);
+      flipNormal = (nC.x() * xC < -1e-10);
+    }
+  }
+
   // Build grid[i][k]: i indexes columns starting from baseVerts[bcStart].
   // For the last column (i==N, axis column) outer vertices lie on y=0 and are
   // classified on axisEdge so they participate in the edge's 1D mesh.
@@ -3195,6 +3210,7 @@ bool BoundaryCornerField::buildForFace(
     grid[i][0] = bv;
     double ti = arcLengthToParam(ge, bv->x(), bv->y());
     SPoint2 ni = normalAtPoint(ge, ti);
+    if(flipNormal) ni = SPoint2(-ni.x(), -ni.y());
     double bx = bv->x(), by = bv->y();
     GEntity *outerEnt = gf;
 
