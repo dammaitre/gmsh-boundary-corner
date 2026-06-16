@@ -3725,6 +3725,418 @@ double BoundaryCornerField::operator()(double x, double y, double z,
 }
 
 // ---------------------------------------------------------------------------
+// BoundaryDoubleCornerField
+// ---------------------------------------------------------------------------
+
+std::string BoundaryDoubleCornerField::getDescription()
+{
+  return "Structured quad columns covering a full profile that meets the "
+         "symmetry axis at 90 degrees at both ends (nose and tail). "
+         "Compressed corner columns at each axis endpoint, constant-width "
+         "columns in between.";
+}
+
+BoundaryDoubleCornerField::BoundaryDoubleCornerField()
+  : h1_(1e-3), ratio_(1.15), w0max_(0.1), lBL_(-1.0), omega_(1.0),
+    nbLayers_(30), nbCornerColumns_(10), skipAxisColumn_(0),
+    lBLeff_(1e-3), hTotal_(0.0)
+{
+  nosePoint_[0] = nosePoint_[1] = 0.0;
+  tailPoint_[0] = tailPoint_[1] = 0.0;
+
+  options["CurvesList"] = new FieldOptionList(
+    curvesList_, "Tags of the profile curves", &update_needed);
+  options["NosePoint"] = new FieldOptionListDouble(
+    nosePointList_, "Nose axis point [x_nose, 0.0]", &update_needed);
+  options["TailPoint"] = new FieldOptionListDouble(
+    tailPointList_, "Tail axis point [x_tail, 0.0]", &update_needed);
+  options["Size"] = new FieldOptionDouble(
+    h1_, "Height of the first BL row", &update_needed);
+  options["Ratio"] = new FieldOptionDouble(
+    ratio_, "Geometric growth ratio between successive BL rows", &update_needed);
+  options["NbLayers"] = new FieldOptionInt(
+    nbLayers_, "Number of BL rows", &update_needed);
+  options["NbCornerColumns"] = new FieldOptionInt(
+    nbCornerColumns_,
+    "Number of arc-length-compressed columns from each axis point outward.",
+    &update_needed);
+  options["MaxColumnWidth"] = new FieldOptionDouble(
+    w0max_,
+    "Column arc-length in the constant-width mid-section.",
+    &update_needed);
+  options["ColWidth"] = new FieldOptionDouble(
+    lBL_,
+    "Arc-length of the innermost BC column at each axis point. -1 = use Size.",
+    &update_needed);
+  options["Omega"] = new FieldOptionDouble(
+    omega_, "Height scale factor for BC rows (default 1.0)", &update_needed);
+  options["SkipAxisColumn"] = new FieldOptionInt(
+    skipAxisColumn_,
+    "Set to 1 to omit the structured quad columns exactly on y=0. "
+    "Use for 3D wedge revolve meshes.",
+    &update_needed);
+}
+
+void BoundaryDoubleCornerField::computeParameters()
+{
+  lBLeff_ = (lBL_ > 0.0) ? lBL_ : h1_;
+  if(lBLeff_ < 1e-100) lBLeff_ = 1e-100;
+
+  {
+    auto it = nosePointList_.begin();
+    nosePoint_[0] = (it != nosePointList_.end()) ? *it++ : 0.0;
+    nosePoint_[1] = (it != nosePointList_.end()) ? *it   : 0.0;
+  }
+  {
+    auto it = tailPointList_.begin();
+    tailPoint_[0] = (it != tailPointList_.end()) ? *it++ : 0.0;
+    tailPoint_[1] = (it != tailPointList_.end()) ? *it   : 0.0;
+  }
+
+  if(std::abs(ratio_ - 1.0) < 1e-10)
+    hTotal_ = h1_ * nbLayers_;
+  else
+    hTotal_ = h1_ * (std::pow(ratio_, nbLayers_) - 1.0) / (ratio_ - 1.0);
+}
+
+double BoundaryDoubleCornerField::arcLengthToParam(GEdge *ge, double x, double y)
+{
+  double t = 0.0;
+  const SPoint3 p(x, y, 0.0);
+  ge->closestPoint(p, t);
+  return t;
+}
+
+SPoint2 BoundaryDoubleCornerField::normalAtPoint(GEdge *ge, double t)
+{
+  SVector3 d = ge->firstDer(t);
+  double len = d.norm();
+  if(len < 1e-14) return SPoint2(0.0, 1.0);
+  return SPoint2(-d.y() / len, d.x() / len);
+}
+
+void BoundaryDoubleCornerField::subdivideAxisEdge(
+  GEdge *axisEdge, MVertex *axisVert,
+  const std::vector<MVertex *> &axisColVerts,
+  GFace *gf)
+{
+  // axisColVerts = grid[end][1..nbLayers_], where grid[end][nbLayers_] is outermost.
+  // We replace axis MLines that fall in [xNose, xOuter] with the chain:
+  //   vReconnect → axisColVerts[nbLayers_-1] → ... → axisColVerts[0] → axisVert
+  double xNose  = axisVert->x();
+  double xOuter = axisColVerts.back()->x();
+  double xMin = std::min(xNose, xOuter);
+  double xMax = std::max(xNose, xOuter);
+
+  MVertex *vReconnect = nullptr;
+  std::vector<int> toRemove;
+  for(int li = 0; li < (int)axisEdge->lines.size(); li++) {
+    MLine *ml   = axisEdge->lines[li];
+    MVertex *va = ml->getVertex(0), *vb = ml->getVertex(1);
+    bool aIn = (va->x() >= xMin - 1e-14 && va->x() <= xMax + 1e-14);
+    bool bIn = (vb->x() >= xMin - 1e-14 && vb->x() <= xMax + 1e-14);
+    if(aIn && bIn) {
+      toRemove.push_back(li);
+    } else if(aIn != bIn) {
+      toRemove.push_back(li);
+      vReconnect = aIn ? vb : va;
+    }
+  }
+
+  if(vReconnect && !toRemove.empty()) {
+    int insertPos = toRemove.front();
+    for(int i = (int)toRemove.size() - 1; i >= 0; i--) {
+      delete axisEdge->lines[toRemove[i]];
+      axisEdge->lines.erase(axisEdge->lines.begin() + toRemove[i]);
+    }
+
+    int nb = (int)axisColVerts.size();  // == nbLayers_
+    // Chain: vReconnect → axisColVerts[nb-1] → ... → axisColVerts[0] → axisVert
+    axisEdge->lines.insert(axisEdge->lines.begin() + insertPos,
+                           new MLine(vReconnect, axisColVerts[nb - 1]));
+    for(int k = nb - 2; k >= 0; k--)
+      axisEdge->lines.insert(axisEdge->lines.begin() + ++insertPos,
+                             new MLine(axisColVerts[k + 1], axisColVerts[k]));
+    axisEdge->lines.insert(axisEdge->lines.begin() + ++insertPos,
+                           new MLine(axisColVerts[0], axisVert));
+
+    auto &mv = axisEdge->mesh_vertices;
+    auto rmBegin = std::remove_if(mv.begin(), mv.end(),
+      [xMin, xMax](MVertex *v) {
+        return v->x() >= xMin - 1e-14 && v->x() <= xMax + 1e-14;
+      });
+    for(auto vit = rmBegin; vit != mv.end(); ++vit) delete *vit;
+    mv.erase(rmBegin, mv.end());
+  } else {
+    Msg::Warning("BoundaryDoubleCorner: failed to subdivide axis GEdge %d",
+                 axisEdge->tag());
+  }
+}
+
+bool BoundaryDoubleCornerField::buildForFace(
+  GFace *gf,
+  const std::vector<MQuadrangle *> &blQuads,
+  const std::set<MVertex *> &blVerts,
+  std::vector<MQuadrangle *> &bcQuads,
+  std::set<MVertex *> &verts,
+  std::vector<MLine *> &outerLines,
+  std::map<MVertex *, std::vector<MVertex *>> &junctionMap,
+  std::vector<std::pair<GEdge *, std::vector<MVertex *>>> &axisReclassifyOut)
+{
+  computeParameters();
+  if(curvesList_.empty() || nbLayers_ < 1) return false;
+
+  GEdge *ge = nullptr;
+  for(int tag : curvesList_) {
+    GEdge *e = gf->model()->getEdgeByTag(tag);
+    if(!e) continue;
+    for(auto *fe : gf->edges()) if(fe == e) { ge = e; break; }
+    if(ge) break;
+  }
+  if(!ge) return false;
+
+  // Build baseVerts: GVertex-start + mesh_vertices + GVertex-end
+  std::vector<MVertex *> baseVerts;
+  if(ge->getBeginVertex() && !ge->getBeginVertex()->mesh_vertices.empty())
+    baseVerts.push_back(ge->getBeginVertex()->mesh_vertices[0]);
+  for(auto *v : ge->mesh_vertices) baseVerts.push_back(v);
+  if(ge->getEndVertex() && !ge->getEndVertex()->mesh_vertices.empty())
+    baseVerts.push_back(ge->getEndVertex()->mesh_vertices[0]);
+  if((int)baseVerts.size() < 2) {
+    Msg::Error("BoundaryDoubleCorner: GEdge %d has no 1D mesh yet", ge->tag());
+    return false;
+  }
+
+  // Deduplicate consecutive baseVerts at the same (x,y) position.  This can
+  // occur when a LC-spaced intermediate vertex lands exactly on the next
+  // scatter-point knot, giving two coincident entries in ge->mesh_vertices and
+  // producing zero-area base faces in the quad columns.
+  {
+    const double tol2 = 1e-20;
+    std::vector<MVertex *> dedup;
+    dedup.reserve(baseVerts.size());
+    dedup.push_back(baseVerts[0]);
+    for(int i = 1; i < (int)baseVerts.size(); i++) {
+      double dx = baseVerts[i]->x() - dedup.back()->x();
+      double dy = baseVerts[i]->y() - dedup.back()->y();
+      if(dx*dx + dy*dy > tol2) dedup.push_back(baseVerts[i]);
+    }
+    baseVerts = std::move(dedup);
+  }
+  if((int)baseVerts.size() < 2) {
+    Msg::Error("BoundaryDoubleCorner: GEdge %d: all baseVerts coincide", ge->tag());
+    return false;
+  }
+
+  // Orient baseVerts so nosePoint_ is at front, tailPoint_ at back.
+  auto sqDist2 = [](MVertex *v, double x, double y) {
+    double dx = v->x() - x, dy = v->y() - y;
+    return dx*dx + dy*dy;
+  };
+  {
+    MVertex *vF = baseVerts.front(), *vB = baseVerts.back();
+    double dFN = sqDist2(vF, nosePoint_[0], nosePoint_[1]);
+    double dBN = sqDist2(vB, nosePoint_[0], nosePoint_[1]);
+    if(dBN < dFN)
+      std::reverse(baseVerts.begin(), baseVerts.end());
+  }
+
+  // Detect BL-consumed vertices at the nose end (bcStart) and tail end (bcEnd).
+  std::set<MVertex *> blOuterVerts;
+  for(auto *q : blQuads)
+    for(int j = 2; j <= 3; j++) blOuterVerts.insert(q->getVertex(j));
+
+  int bcStart = 0;
+  for(int i = 1; i < (int)baseVerts.size(); i++) {
+    if(blOuterVerts.count(baseVerts[i])) bcStart = i;
+    else break;
+  }
+
+  int bcEnd = 0;
+  for(int i = (int)baseVerts.size() - 2; i >= 0; i--) {
+    if(blOuterVerts.count(baseVerts[i])) bcEnd = (int)baseVerts.size() - 1 - i;
+    else break;
+  }
+
+  // Find axis GVertices and GEdges at nose and tail.
+  auto findAxisEdge = [&](MVertex *axisVert) -> std::pair<GVertex *, GEdge *> {
+    GVertex *axisGV = nullptr;
+    for(auto *gv : {ge->getBeginVertex(), ge->getEndVertex()}) {
+      if(!gv || gv->mesh_vertices.empty()) continue;
+      if(gv->mesh_vertices[0] == axisVert) { axisGV = gv; break; }
+    }
+    GEdge *axisEdge = nullptr;
+    if(axisGV) {
+      for(auto *adj : axisGV->edges()) {
+        if(adj == ge) continue;
+        GVertex *other = (adj->getBeginVertex() == axisGV) ? adj->getEndVertex()
+                                                            : adj->getBeginVertex();
+        if(other && std::abs(other->y()) < 1e-10) { axisEdge = adj; break; }
+      }
+    }
+    return {axisGV, axisEdge};
+  };
+
+  MVertex *noseVert = baseVerts.front();
+  MVertex *tailVert = baseVerts.back();
+  auto [noseGV, noseAxisEdge] = findAxisEdge(noseVert);
+  auto [tailGV, tailAxisEdge] = findAxisEdge(tailVert);
+
+  // N = number of inter-vertex segments to cover with quad columns.
+  // When axis edges are found we include the endpoint columns; otherwise skip them
+  // (as BCF does) and leave a small gap for Delaunay.
+  bool includeNose = (noseAxisEdge && !skipAxisColumn_);
+  bool includeTail = (tailAxisEdge && !skipAxisColumn_);
+
+  // Useful baseVerts range: [bcStart .. M-1-bcEnd].
+  // Number of segments in that range = M - 1 - bcStart - bcEnd.
+  // Including both endpoints means all segments; excluding one endpoint removes
+  // one column from that end (start or finish the walk one step inside).
+  int M = (int)baseVerts.size();
+  int N = M - 1 - bcStart - bcEnd;
+  if(!includeNose) N--;   // skip noseVert column
+  if(!includeTail) N--;   // skip tailVert column
+  if(N < 1) {
+    Msg::Warning("BoundaryDoubleCorner: no segments remain after BL fan for GEdge %d",
+                 ge->tag());
+    return false;
+  }
+
+  // First base-vert index: bcStart when includeNose, bcStart+1 when not.
+  int startIdx = includeNose ? bcStart : bcStart + 1;
+
+  auto baseVertForCol = [&](int i) -> MVertex * {
+    return baseVerts[startIdx + i];
+  };
+
+  // Determine normal orientation using nose point (must point outward from axis).
+  bool flipNormal = false;
+  {
+    double xN = nosePoint_[0];
+    if(std::abs(xN) > 1e-10) {
+      double tN = arcLengthToParam(ge, noseVert->x(), noseVert->y());
+      SPoint2 nN = normalAtPoint(ge, tN);
+      flipNormal = (nN.x() * xN < -1e-10);
+    }
+  }
+
+  std::vector<std::vector<MVertex *>> grid(N + 1,
+    std::vector<MVertex *>(nbLayers_ + 1, nullptr));
+
+  int nc = nbCornerColumns_;
+
+  for(int i = 0; i <= N; i++) {
+    MVertex *bv = baseVertForCol(i);
+    grid[i][0] = bv;
+
+    double ti = arcLengthToParam(ge, bv->x(), bv->y());
+    SPoint2 ni = normalAtPoint(ge, ti);
+    if(flipNormal) ni = SPoint2(-ni.x(), -ni.y());
+    double bx = bv->x(), by = bv->y();
+
+    // Force axis columns onto y=0 with exact horizontal normal.
+    bool isNoseCol = (includeNose && i == 0);
+    bool isTailCol = (includeTail && i == N);
+    if(isNoseCol) {
+      double signX = (nosePoint_[0] >= 0.0) ? 1.0 : -1.0;
+      ni = SPoint2(signX, 0.0);
+      by = 0.0;
+    } else if(isTailCol) {
+      double signX = (tailPoint_[0] >= 0.0) ? 1.0 : -1.0;
+      ni = SPoint2(signX, 0.0);
+      by = 0.0;
+    }
+
+    // Alpha blending: 1 at both axis columns, 0 in the constant-width mid-section.
+    // Nose corner zone: i = 0..nc  (0=axis col, nc=shoulder)
+    // Tail corner zone: i = N-nc..N (N-nc=shoulder, N=axis col)
+    // Middle:           i = nc..N-nc
+    double alpha;
+    if(i <= nc)
+      alpha = 1.0 - (double)i / nc;
+    else if(i >= N - nc)
+      alpha = (double)(i - (N - nc)) / nc;
+    else
+      alpha = 0.0;
+
+    for(int k = 1; k <= nbLayers_; k++) {
+      double hk_bl = (std::abs(ratio_ - 1.0) < 1e-10)
+                     ? h1_ * omega_ * k
+                     : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
+      double hk_sq = omega_ * hTotal_ / nbLayers_ * k;
+      double hk    = (1.0 - alpha) * hk_bl + alpha * hk_sq;
+      grid[i][k] = new MVertex(bx + ni.x() * hk, by + ni.y() * hk, 0.0, gf);
+    }
+  }
+
+  // Subdivide axis edges and record for later reclassification.
+  if(includeNose) {
+    std::vector<MVertex *> noseColVerts(nbLayers_);
+    for(int k = 1; k <= nbLayers_; k++) noseColVerts[k - 1] = grid[0][k];
+    subdivideAxisEdge(noseAxisEdge, noseVert, noseColVerts, gf);
+    axisReclassifyOut.push_back({noseAxisEdge, std::move(noseColVerts)});
+  }
+  if(includeTail) {
+    std::vector<MVertex *> tailColVerts(nbLayers_);
+    for(int k = 1; k <= nbLayers_; k++) tailColVerts[k - 1] = grid[N][k];
+    subdivideAxisEdge(tailAxisEdge, tailVert, tailColVerts, gf);
+    axisReclassifyOut.push_back({tailAxisEdge, std::move(tailColVerts)});
+  }
+
+  // Collect interior BC vertices.
+  for(int i = 0; i <= N; i++)
+    for(int k = 1; k <= nbLayers_; k++)
+      if(grid[i][k] && !blVerts.count(grid[i][k]))
+        verts.insert(grid[i][k]);
+
+  // Outer boundary MLines (k = nbLayers_ row).
+  for(int i = 0; i < N; i++)
+    outerLines.push_back(new MLine(grid[i][nbLayers_], grid[i + 1][nbLayers_]));
+
+  // Build quads.
+  for(int i = 0; i < N; i++)
+    for(int k = 0; k < nbLayers_; k++)
+      bcQuads.push_back(new MQuadrangle(
+        grid[i][k],         grid[i + 1][k],
+        grid[i + 1][k + 1], grid[i][k + 1]));
+
+  Msg::Warning("BoundaryDoubleCorner (pre-mesh): %d columns x %d layers = %d quads"
+               " (face %d), noseAxisEdge=%d tailAxisEdge=%d",
+               N, nbLayers_, N * nbLayers_, gf->tag(),
+               noseAxisEdge ? noseAxisEdge->tag() : -1,
+               tailAxisEdge ? tailAxisEdge->tag() : -1);
+  return true;
+}
+
+double BoundaryDoubleCornerField::operator()(double x, double y, double z,
+                                             GEntity *ge)
+{
+  computeParameters();
+
+  auto zoneDist = [&](double px, double py) {
+    double dx = x - px, dy = y - py;
+    return std::sqrt(dx*dx + dy*dy);
+  };
+  double dist = std::min(zoneDist(nosePoint_[0], nosePoint_[1]),
+                         zoneDist(tailPoint_[0], tailPoint_[1]));
+
+  int nc = std::max(1, nbCornerColumns_);
+  double eps_op;
+  const double q_op = (w0max_ > 1e-100) ? lBLeff_ / w0max_ : 1.0;
+  if(nc < 2 || q_op >= 1.0 - 1e-10)
+    eps_op = 1.0;
+  else
+    eps_op = std::pow(q_op, 1.0 / (nc - 1));
+  double S_corner = (std::abs(eps_op - 1.0) < 1e-10)
+      ? w0max_ * nc
+      : w0max_ * (1.0 - std::pow(eps_op, nc)) / (1.0 - eps_op);
+
+  if(S_corner > 0.0 && dist < S_corner)
+    return lBLeff_ + (w0max_ - lBLeff_) * dist / S_corner;
+  return 1e22;
+}
+
+// ---------------------------------------------------------------------------
 
 FieldManager::FieldManager()
 {
@@ -3732,6 +4144,7 @@ FieldManager::FieldManager()
   map_type_name["Threshold"] = new FieldFactoryT<ThresholdField>();
   map_type_name["BoundaryLayer"] = new FieldFactoryT<BoundaryLayerField>();
   map_type_name["BoundaryCorner"] = new FieldFactoryT<BoundaryCornerField>();
+  map_type_name["BoundaryDoubleCorner"] = new FieldFactoryT<BoundaryDoubleCornerField>();
   map_type_name["Box"] = new FieldFactoryT<BoxField>();
   map_type_name["Cylinder"] = new FieldFactoryT<CylinderField>();
   map_type_name["Ball"] = new FieldFactoryT<BallField>();

@@ -295,6 +295,48 @@ private:
   SPoint2 normalAtPoint(GEdge *ge, double t);
 };
 
+class BoundaryDoubleCornerField : public Field {
+public:
+  BoundaryDoubleCornerField();
+  ~BoundaryDoubleCornerField() override = default;
+
+  double operator()(double x, double y, double z,
+                    GEntity *ge = nullptr) override;
+  const char *getName() override { return "BoundaryDoubleCorner"; }
+  std::string getDescription() override;
+
+  // Pre-mesh: compute BC geometry for a profile that meets the axis at both ends.
+  // Fills bcQuads, verts, outerLines.  Appends up to two {axisEdge, axisColVerts}
+  // pairs to axisReclassifyOut (nose end first, then tail end).
+  // Returns true if this field applies to gf.
+  bool buildForFace(GFace *gf,
+                    const std::vector<MQuadrangle *> &blQuads,
+                    const std::set<MVertex *> &blVerts,
+                    std::vector<MQuadrangle *> &bcQuads,
+                    std::set<MVertex *> &verts,
+                    std::vector<MLine *> &outerLines,
+                    std::map<MVertex *, std::vector<MVertex *>> &junctionMap,
+                    std::vector<std::pair<GEdge *,
+                      std::vector<MVertex *>>> &axisReclassifyOut);
+
+private:
+  std::list<int>    curvesList_;
+  std::list<double> nosePointList_;   // NosePoint [x_nose, 0.0]
+  std::list<double> tailPointList_;   // TailPoint [x_tail, 0.0]
+  double h1_, ratio_, w0max_, lBL_, omega_;
+  int    nbLayers_, nbCornerColumns_, skipAxisColumn_;
+
+  double nosePoint_[2], tailPoint_[2];
+  double lBLeff_, hTotal_;
+
+  void    computeParameters();
+  double  arcLengthToParam(GEdge *ge, double x, double y);
+  SPoint2 normalAtPoint(GEdge *ge, double t);
+  void    subdivideAxisEdge(GEdge *axisEdge, MVertex *axisVert,
+                            const std::vector<MVertex *> &axisColVerts,
+                            GFace *gf);
+};
+
 class FieldOptionString : public FieldOption {
 public:
   std::string &val;

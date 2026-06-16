@@ -1038,22 +1038,33 @@ static void modifyInitialMeshForBoundaryCorners(
   std::set<MVertex *> &verts,
   std::vector<std::pair<GEdge *, std::vector<MVertex *>>> &axisReclassify)
 {
+  // The inner meshGenerator call below (after deMeshGFace) is made with
+  // onlyInitialMesh=false, so it would recursively invoke this function again
+  // and generate duplicate BC quads at every nesting level.  Guard against it.
+  static thread_local bool inProgress = false;
+  if(inProgress) return;
+  inProgress = true;
+  struct Guard { ~Guard() { inProgress = false; } } guard;
+
   FieldManager *fields = gf->model()->getFields();
   std::vector<MLine *> outerLines;
   std::map<MVertex *, std::vector<MVertex *>> junctionMap;
 
   bool anyApplied = false;
   for(auto it = fields->begin(); it != fields->end(); ++it) {
-    BoundaryCornerField *bcf =
-      dynamic_cast<BoundaryCornerField *>(it->second);
-    if(!bcf) continue;
-    GEdge *axisEdgeOut = nullptr;
-    std::vector<MVertex *> axisColVertsOut;
-    if(bcf->buildForFace(gf, blQuads, blVerts, bcQuads, verts, outerLines,
-                         junctionMap, axisEdgeOut, axisColVertsOut))
-      anyApplied = true;
-    if(axisEdgeOut && !axisColVertsOut.empty())
-      axisReclassify.push_back({axisEdgeOut, std::move(axisColVertsOut)});
+    if(auto *bcf = dynamic_cast<BoundaryCornerField *>(it->second)) {
+      GEdge *axisEdgeOut = nullptr;
+      std::vector<MVertex *> axisColVertsOut;
+      if(bcf->buildForFace(gf, blQuads, blVerts, bcQuads, verts, outerLines,
+                           junctionMap, axisEdgeOut, axisColVertsOut))
+        anyApplied = true;
+      if(axisEdgeOut && !axisColVertsOut.empty())
+        axisReclassify.push_back({axisEdgeOut, std::move(axisColVertsOut)});
+    } else if(auto *bdcf = dynamic_cast<BoundaryDoubleCornerField *>(it->second)) {
+      if(bdcf->buildForFace(gf, blQuads, blVerts, bcQuads, verts, outerLines,
+                            junctionMap, axisReclassify))
+        anyApplied = true;
+    }
   }
   if(!anyApplied || outerLines.empty()) {
     for(auto *l : outerLines) delete l;
