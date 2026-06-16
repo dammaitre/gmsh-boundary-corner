@@ -30,7 +30,7 @@ N_SCATTER = 200  # interior sample points per arc
 
 # ── Mesh sizes ────────────────────────────────────────────────────────────────
 LC_FAR  = 10.0
-LC_BODY =   0.50
+LC_BODY =   0.25
 #LC_NOSE =   5e-3
 LC_NOSE = .01
 
@@ -59,7 +59,7 @@ gmsh.model.add("ellipse2dbig")
 p_origin = gmsh.model.geo.addPoint(  0,      0,     0, LC_BODY)
 p_nose   = gmsh.model.geo.addPoint(  A,      0,     0, LC_NOSE)
 p_tail   = gmsh.model.geo.addPoint( -A,      0,     0, LC_NOSE)
-p_top    = gmsh.model.geo.addPoint(  0,      B,     0, LC_BODY)
+p_top    = gmsh.model.geo.addPoint(  0,      B,     0, LC_NOSE)
 p_ax_r   = gmsh.model.geo.addPoint(  X_FAR,  0,     0, LC_FAR)
 p_ax_l   = gmsh.model.geo.addPoint( -X_FAR,  0,     0, LC_FAR)
 p_far_tr = gmsh.model.geo.addPoint(  X_FAR,  Y_FAR, 0, LC_FAR)
