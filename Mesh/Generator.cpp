@@ -542,6 +542,9 @@ static void Mesh2D(GModel *m)
     }
   }
 
+  // BoundaryCorner quad columns are now injected during face meshing inside
+  // meshGFace.cpp (modifyInitialMeshForBoundaryCorners), analogous to BL.
+
   Msg::SetNumThreads(prevNumThreads);
 
   double t2 = Cpu();

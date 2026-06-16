@@ -27,8 +27,16 @@
 #include "BackgroundMeshTools.h"
 #include "STensor3.h"
 #include "ExtrudeParams.h"
+#include "SPoint2.h"
+#include "GEdge.h"
+#include "GFace.h"
+#include "MVertex.h"
+#include "MTriangle.h"
+#include "MQuadrangle.h"
+#include "MLine.h"
 #include "automaticMeshSizeField.h"
 #include "nanoflann.hpp"
+#include "meshGFaceDelaunayInsertion.h"
 
 #if defined(HAVE_POST)
 #include "PView.h"
@@ -2978,11 +2986,781 @@ void BoundaryLayerField::operator()(double x, double y, double z,
   metr = v;
 }
 
+// ---------------------------------------------------------------------------
+// BoundaryCornerField
+// ---------------------------------------------------------------------------
+
+std::string BoundaryCornerField::getDescription()
+{
+  return "Structured quad columns at the corner where a boundary-layer profile "
+         "meets the symmetry axis at 90 degrees (typical OpenFOAM wedge mesh).";
+}
+
+BoundaryCornerField::BoundaryCornerField()
+  : h1_(1e-3), ratio_(1.15), nbLayers_(30),
+    nbCornerColumns_(10), w0max_(0.1), lBL_(-1.0), omega_(1.0),
+    skipAxisColumn_(0), lBLeff_(1e-3), hTotal_(0.0)
+{
+  axisPoint_[0] = axisPoint_[1] = 0.0;
+
+  options["CurvesList"] = new FieldOptionList(
+    curvesList_, "Tags of the profile curves", &update_needed);
+  options["AxisPoint"] = new FieldOptionListDouble(
+    axisPointList_, "Critical point on the axis [x_a, 0.0]", &update_needed);
+  options["Size"] = new FieldOptionDouble(
+    h1_, "Height of the first BL row", &update_needed);
+  options["Ratio"] = new FieldOptionDouble(
+    ratio_, "Geometric growth ratio between successive BL rows", &update_needed);
+  options["NbLayers"] = new FieldOptionInt(
+    nbLayers_, "Number of BL rows", &update_needed);
+  options["NbCornerColumns"] = new FieldOptionInt(
+    nbCornerColumns_,
+    "Number of arc-length-compressed columns from AxisPoint outward.  "
+    "Beyond these columns the column arc-length is held constant at MaxColumnWidth.",
+    &update_needed);
+  options["MaxColumnWidth"] = new FieldOptionDouble(
+    w0max_,
+    "Column arc-length in the constant-width section (farthest from AxisPoint) "
+    "and maximum arc-length of the compressed corner columns.",
+    &update_needed);
+  options["ColWidth"] = new FieldOptionDouble(
+    lBL_,
+    "Arc-length of the innermost BC column at AxisPoint (corner cell).  "
+    "-1 = use Size (h1)",
+    &update_needed);
+  options["Omega"] = new FieldOptionDouble(
+    omega_, "Height scale factor for BC rows (default 1.0)", &update_needed);
+  options["SkipAxisColumn"] = new FieldOptionInt(
+    skipAxisColumn_,
+    "Set to 1 to omit the structured quad column exactly on y=0 (the AxisPoint "
+    "column).  Required when the 2D mesh will be revolved for a 3D wedge (e.g. "
+    "OpenFOAM axisymmetric); the axis column creates zero-volume cells under "
+    "rotation.  Default 0 (column included, correct for 2D axisymmetric).",
+    &update_needed);
+}
+
+void BoundaryCornerField::computeParameters()
+{
+  lBLeff_ = (lBL_ > 0.0) ? lBL_ : h1_;
+  if(lBLeff_ < 1e-100) lBLeff_ = 1e-100;
+
+  {
+    auto it = axisPointList_.begin();
+    axisPoint_[0] = (it != axisPointList_.end()) ? *it++ : 0.0;
+    axisPoint_[1] = (it != axisPointList_.end()) ? *it   : 0.0;
+  }
+
+  if(std::abs(ratio_ - 1.0) < 1e-10)
+    hTotal_ = h1_ * nbLayers_;
+  else
+    hTotal_ = h1_ * (std::pow(ratio_, nbLayers_) - 1.0) / (ratio_ - 1.0);
+}
+
+// Returns parameter t on ge closest to (x, y)
+double BoundaryCornerField::arcLengthToParam(GEdge *ge, double x, double y)
+{
+  double t = 0.0;
+  const SPoint3 p(x, y, 0.0);  // const forces the virtual GPoint overload (double &param)
+  ge->closestPoint(p, t);       // t is now an output: parameter of closest point
+  return t;
+}
+
+// Unit inward normal at parameter t (rotate tangent 90° CCW)
+SPoint2 BoundaryCornerField::normalAtPoint(GEdge *ge, double t)
+{
+  SVector3 d = ge->firstDer(t);
+  double len = d.norm();
+  if(len < 1e-14) return SPoint2(0.0, 1.0);
+  return SPoint2(-d.y() / len, d.x() / len);
+}
+
+bool BoundaryCornerField::buildForFace(
+  GFace *gf,
+  const std::vector<MQuadrangle *> &blQuads,
+  const std::set<MVertex *> &blVerts,
+  std::vector<MQuadrangle *> &bcQuads,
+  std::set<MVertex *> &verts,
+  std::vector<MLine *> &outerLines,
+  std::map<MVertex *, std::vector<MVertex *>> &junctionMap,
+  GEdge *&axisEdgeOut,
+  std::vector<MVertex *> &axisColVertsOut)
+{
+  axisEdgeOut = nullptr;
+  computeParameters();
+  if(curvesList_.empty() || nbLayers_ < 1) return false;
+
+  // Resolve GEdge and check it belongs to gf
+  GEdge *ge = nullptr;
+  for(int tag : curvesList_) {
+    GEdge *e = gf->model()->getEdgeByTag(tag);
+    if(!e) continue;
+    for(auto *fe : gf->edges()) if(fe == e) { ge = e; break; }
+    if(ge) break;
+  }
+  if(!ge) return false;
+
+  std::vector<MVertex *> baseVerts;
+  if(ge->getBeginVertex() && !ge->getBeginVertex()->mesh_vertices.empty())
+    baseVerts.push_back(ge->getBeginVertex()->mesh_vertices[0]);
+  for(auto *v : ge->mesh_vertices) baseVerts.push_back(v);
+  if(ge->getEndVertex() && !ge->getEndVertex()->mesh_vertices.empty())
+    baseVerts.push_back(ge->getEndVertex()->mesh_vertices[0]);
+  if((int)baseVerts.size() < 2) {
+    Msg::Error("BoundaryCorner: GEdge %d has no 1D mesh yet", ge->tag());
+    return false;
+  }
+
+  // Ensure baseVerts runs from profile-start → axisPoint; reverse if necessary.
+  auto sqDist = [](MVertex *v, double x, double y) {
+    double dx = v->x() - x, dy = v->y() - y;
+    return dx*dx + dy*dy;
+  };
+  MVertex *vFront = baseVerts.front(), *vBack = baseVerts.back();
+  double dFrontA = sqDist(vFront, axisPoint_[0], axisPoint_[1]);
+  double dBackA  = sqDist(vBack,  axisPoint_[0], axisPoint_[1]);
+  if(dFrontA < dBackA)  // front is closer to axis → reverse so axis end is at back
+    std::reverse(baseVerts.begin(), baseVerts.end());
+
+  // Detect how many leading arc_bc segments are consumed by BL.
+  // When BL builds a fan at p_start, it may use arc_bc vertices (baseVerts[i])
+  // as outer-row (j=2 or j=3) vertices in BL quads.  Such segments are XOR-
+  // cancelled by BL and BC must skip them.
+  int bcStart = 0;
+  {
+    std::set<MVertex*> blOuterVerts;
+    for(auto *q : blQuads)
+      for(int j = 2; j <= 3; j++) blOuterVerts.insert(q->getVertex(j));
+    // Walk from baseVerts[1] forward; find the LAST baseVerts[i] that is in blOuterVerts.
+    // bcStart = that index (all segments 0..i-1 were consumed).
+    for(int i = 1; i < (int)baseVerts.size(); i++) {
+      if(blOuterVerts.count(baseVerts[i])) {
+        bcStart = i;
+      } else break;  // stop at first non-consumed vertex
+    }
+  }
+
+  // Find the GVertex and GEdge at the axis end (y=0) so the last column can be
+  // included as quads.  The axis outer vertices land on y=0; we classify them on
+  // the axis GEdge and subdivide its 1D mesh so the XOR bedges cancel cleanly.
+  GVertex *axisGV = nullptr;
+  for(auto *gv : {ge->getBeginVertex(), ge->getEndVertex()}) {
+    if(!gv || gv->mesh_vertices.empty()) continue;
+    if(gv->mesh_vertices[0] == baseVerts.back()) { axisGV = gv; break; }
+  }
+  GEdge *axisEdge = nullptr;
+  if(axisGV) {
+    for(auto *adj : axisGV->edges()) {
+      if(adj == ge) continue;
+      GVertex *other = (adj->getBeginVertex() == axisGV) ? adj->getEndVertex()
+                                                          : adj->getBeginVertex();
+      if(other && std::abs(other->y()) < 1e-10) { axisEdge = adj; break; }
+    }
+  }
+  // With a known axis edge we include the last column (axis column) as quads.
+  // Without it fall back to the old behaviour: skip the last column and let
+  // Delaunay fill the small gap with a triangle.
+  int N = (axisEdge && !skipAxisColumn_) ? (int)baseVerts.size() - 1 - bcStart
+                                        : (int)baseVerts.size() - 2 - bcStart;
+  if(N < 1) {
+    Msg::Warning("BoundaryCorner: no arc_bc segments remain after BL fan for GEdge %d", ge->tag());
+    return false;
+  }
+
+  // At the BL/BC junction (baseVerts[bcStart]), the BL fan's last quad has the
+  // junction vertex at j=2 and the BL outermost vertex (c1_top) at j=3.
+  // Reusing c1_top as grid[0][nbLayers_] closes the gap between the BL outer row
+  // and the BC outer row.  Without this the Delaunay fills a ~h_total-wide wedge
+  // between the two independently-placed outer vertices with triangles that reach
+  // down to the profile.
+  MVertex *blOuterAtJunction = nullptr;
+  {
+    MVertex *jv = baseVerts[bcStart];
+    for(auto *q : blQuads)
+      if(q->getVertex(2) == jv) { blOuterAtJunction = q->getVertex(3); break; }
+  }
+  const bool useStitch = (blOuterAtJunction != nullptr) &&
+                         (bcStart + 1 < (int)baseVerts.size());
+
+  // Determine whether the normals computed via normalAtPoint point outward.
+  // At C=(xC,0) the body meets the axis at 90°; the outward normal must point in
+  // the sign(xC) * x̂ direction.  If normalAtPoint gives the opposite sign at C,
+  // all normals for this field need to be negated.
+  bool flipNormal = false;
+  {
+    double xC = axisPoint_[0];
+    if(std::abs(xC) > 1e-10) {
+      MVertex *axisVert = baseVerts.back();
+      double tC = arcLengthToParam(ge, axisVert->x(), axisVert->y());
+      SPoint2 nC = normalAtPoint(ge, tC);
+      flipNormal = (nC.x() * xC < -1e-10);
+    }
+  }
+
+  // Build grid[i][k]: i indexes columns starting from baseVerts[bcStart].
+  // For the last column (i==N, axis column) outer vertices lie on y=0 and are
+  // classified on axisEdge so they participate in the edge's 1D mesh.
+  // For the first column (i==0, non-axis end), reuse outer vertices from a
+  // previously processed BC field if that field already built the same column
+  // (junction sharing: two BC arcs meeting at a common GVertex).
+  std::vector<std::vector<MVertex *>> grid(N + 1,
+    std::vector<MVertex *>(nbLayers_ + 1, nullptr));
+
+  for(int i = 0; i <= N; i++) {
+    MVertex *bv = baseVerts[bcStart + i];
+    grid[i][0] = bv;
+    double ti = arcLengthToParam(ge, bv->x(), bv->y());
+    SPoint2 ni = normalAtPoint(ge, ti);
+    if(flipNormal) ni = SPoint2(-ni.x(), -ni.y());
+    double bx = bv->x(), by = bv->y();
+
+    // Axis column: regardless of curve discretisation the normal must be exactly
+    // along x and the base y must be exactly 0 so outer vertices land on y=0.
+    if(i == N && axisEdge) {
+      double signX = (axisPoint_[0] >= 0.0) ? 1.0 : -1.0;
+      ni = SPoint2(signX, 0.0);
+      by = 0.0;
+    }
+    GEntity *outerEnt = gf;
+
+    // At the non-axis end (i==0), reuse outer vertices if another BC field
+    // already owns this junction base vertex — avoids duplicate walls in XOR.
+    if(i == 0) {
+      auto jit = junctionMap.find(bv);
+      if(jit != junctionMap.end() &&
+         (int)jit->second.size() == nbLayers_) {
+        for(int k = 1; k <= nbLayers_; k++)
+          grid[0][k] = jit->second[k - 1];
+        continue;
+      }
+    }
+
+    for(int k = 1; k <= nbLayers_; k++) {
+      if(useStitch && i == 0 && k < nbLayers_)
+        continue;  // intermediate col-0 vertices unused in stitch path
+      double hk = (std::abs(ratio_ - 1.0) < 1e-10)
+                  ? h1_ * omega_ * k
+                  : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
+      grid[i][k] = new MVertex(bx + ni.x() * hk, by + ni.y() * hk, 0.0, outerEnt);
+    }
+
+    // Register the non-axis end column so a subsequent BC field can share it.
+    if(i == 0) {
+      std::vector<MVertex *> col(nbLayers_);
+      for(int k = 1; k <= nbLayers_; k++) col[k - 1] = grid[0][k];
+      junctionMap[bv] = std::move(col);
+    }
+  }
+
+  // Subdivide the axis GEdge's 1D mesh to include grid[N][1..nbLayers_].
+  // grid[N][k] lie on y=0 from axisVert to grid[N][nbLayers_]; they may span
+  // several existing axis MLines.  We remove every axis MLine that falls in the
+  // range [xNose, xOuter] plus the one that straddles xOuter, then insert the
+  // new chain so the XOR bedges from the axis edge and the last-column right
+  // side cancel cleanly.
+  if(axisEdge) {
+    MVertex *axisVert = baseVerts.back();
+    double xNose  = axisVert->x();
+    double xOuter = grid[N][nbLayers_]->x();
+    // xOuter > xNose for a downstream (nose) axis, xOuter < xNose for an
+    // upstream (tail) axis — use min/max so both cases find the right lines.
+    double xMin = std::min(xNose, xOuter);
+    double xMax = std::max(xNose, xOuter);
+
+    MVertex *vReconnect = nullptr;
+    std::vector<int> toRemove;
+    for(int li = 0; li < (int)axisEdge->lines.size(); li++) {
+      MLine *ml   = axisEdge->lines[li];
+      MVertex *va = ml->getVertex(0), *vb = ml->getVertex(1);
+      bool aIn = (va->x() >= xMin - 1e-14 && va->x() <= xMax + 1e-14);
+      bool bIn = (vb->x() >= xMin - 1e-14 && vb->x() <= xMax + 1e-14);
+      if(aIn && bIn) {
+        toRemove.push_back(li);
+      } else if(aIn != bIn) {
+        // Straddle: one vertex inside range, one outside (beyond the outer column)
+        toRemove.push_back(li);
+        vReconnect = aIn ? vb : va;
+      }
+    }
+
+    if(vReconnect && !toRemove.empty()) {
+      int insertPos = toRemove.front();
+      for(int i = (int)toRemove.size() - 1; i >= 0; i--) {
+        delete axisEdge->lines[toRemove[i]];
+        axisEdge->lines.erase(axisEdge->lines.begin() + toRemove[i]);
+      }
+
+      // Insert chain running toward axisVert (matching the axis edge direction):
+      // vReconnect → [transition verts] → grid[N][nbLayers_] → ... → grid[N][1] → axisVert
+      //
+      // The segment vReconnect→grid[N][nbLayers_] can be orders of magnitude longer
+      // than the adjacent outer BC edge (W0_MIN wide).  Subdivide it geometrically
+      // starting from lBLeff_ at grid[N][nbLayers_] and growing by ratio_ toward
+      // vReconnect, so the Delaunay never sees a huge edge next to a tiny one.
+      {
+        double xO = grid[N][nbLayers_]->x();
+        double xR = vReconnect->x();
+        double segLen = std::abs(xR - xO);
+        double signX  = (xR > xO) ? 1.0 : -1.0;
+        // Build a geometric series from lBLeff_ until we cover segLen.
+        std::vector<double> offsets;
+        double s = lBLeff_, acc = 0.0;
+        while(acc + s < segLen - lBLeff_ * 0.5) {
+          acc += s;
+          offsets.push_back(acc);
+          s *= ratio_;
+        }
+        // Insert transition vertices from grid[N][nbLayers_] toward vReconnect.
+        std::vector<MVertex *> transVerts;
+        for(double off : offsets) {
+          MVertex *tv = new MVertex(xO + signX * off, 0.0, 0.0, axisEdge);
+          axisEdge->mesh_vertices.push_back(tv);
+          transVerts.push_back(tv);
+        }
+        // Build MLines: vReconnect → transVerts.back() → ... → transVerts[0] → grid[N][nbLayers_]
+        MVertex *prev = vReconnect;
+        for(int ti = (int)transVerts.size() - 1; ti >= 0; ti--) {
+          axisEdge->lines.insert(axisEdge->lines.begin() + insertPos,
+                                 new MLine(prev, transVerts[ti]));
+          prev = transVerts[ti];
+          ++insertPos;
+        }
+        axisEdge->lines.insert(axisEdge->lines.begin() + insertPos,
+                               new MLine(prev, grid[N][nbLayers_]));
+      }
+      for(int k = nbLayers_ - 1; k >= 1; k--)
+        axisEdge->lines.insert(axisEdge->lines.begin() + ++insertPos,
+                               new MLine(grid[N][k + 1], grid[N][k]));
+      axisEdge->lines.insert(axisEdge->lines.begin() + ++insertPos,
+                             new MLine(grid[N][1], axisVert));
+
+      // Strip and delete the old interior vertices whose MLines we removed.
+      // grid[N][k] are classified on gf (not axisEdge) so they are NOT added here.
+      auto &mv = axisEdge->mesh_vertices;
+      auto rmBegin = std::remove_if(mv.begin(), mv.end(),
+        [xMin, xMax](MVertex *v) {
+          return v->x() >= xMin - 1e-14 && v->x() <= xMax + 1e-14;
+        });
+      for(auto vit = rmBegin; vit != mv.end(); ++vit) delete *vit;
+      mv.erase(rmBegin, mv.end());
+    } else {
+      Msg::Warning("BoundaryCorner: failed to subdivide axis GEdge %d near axis point",
+                   axisEdge->tag());
+    }
+  }
+
+  // Export axis edge + axis-column outer vertices so the caller can reclassify
+  // them from gf to axisEdge AFTER _deleteUnusedVertices (where reparamOnFace
+  // is no longer needed and the vertices still live in gf->mesh_vertices).
+  if(axisEdge) {
+    axisEdgeOut = axisEdge;
+    for(int k = 1; k <= nbLayers_; k++)
+      axisColVertsOut.push_back(grid[N][k]);
+  }
+
+  // Collect all BC face-interior vertices including the axis column.
+  // The axis-column verts stay classified on gf until the caller reclassifies.
+  for(int i = 0; i <= N; i++)
+    for(int k = 1; k <= nbLayers_; k++)
+      if(grid[i][k] && !blVerts.count(grid[i][k]))
+        verts.insert(grid[i][k]);
+
+  // Outer boundary MLines (k = nbLayers_ row, used as re-triangulation constraint)
+  for(int i = 0; i < N; i++)
+    outerLines.push_back(new MLine(grid[i][nbLayers_], grid[i + 1][nbLayers_]));
+
+  if(useStitch) {
+    // Replace BC column 0 with a single stitch quad that:
+    //   • cancels the BL right-wall edge (blOuterAtJunction → junction)
+    //   • cancels the first arc_bc domain segment (junction → baseVerts[bcStart+1])
+    //   • bridges the BL outer row to the BC outer row (grid[0][nbLayers_])
+    // The remaining pocket (from grid[0][nbLayers_] down to baseVerts[bcStart+1]
+    // and back up via BC column 1's left wall) is one column wide and is
+    // triangulated cleanly by the Delaunay without touching the junction profile.
+    bcQuads.push_back(new MQuadrangle(
+      blOuterAtJunction, baseVerts[bcStart],
+      baseVerts[bcStart + 1], grid[0][nbLayers_]));
+    for(int i = 1; i < N; i++)
+      for(int k = 0; k < nbLayers_; k++)
+        bcQuads.push_back(new MQuadrangle(
+          grid[i][k],         grid[i + 1][k],
+          grid[i + 1][k + 1], grid[i][k + 1]));
+  }
+  else {
+    for(int i = 0; i < N; i++)
+      for(int k = 0; k < nbLayers_; k++)
+        bcQuads.push_back(new MQuadrangle(
+          grid[i][k],         grid[i + 1][k],
+          grid[i + 1][k + 1], grid[i][k + 1]));
+  }
+
+  Msg::Warning("BoundaryCorner (pre-mesh): %d columns x %d layers = %d quads (face %d), axisEdge=%d",
+            N, nbLayers_, N * nbLayers_, gf->tag(), axisEdge ? axisEdge->tag() : -1);
+  return true;
+}
+
+void BoundaryCornerField::buildCornerColumns(GModel *gm)
+{
+  computeParameters();
+  if(curvesList_.empty()) return;
+  if(w0max_ <= 0.0 || nbLayers_ < 1) {
+    Msg::Error("BoundaryCorner: MaxColumnWidth must be > 0 and NbLayers >= 1");
+    return;
+  }
+
+  GEdge *ge = gm->getEdgeByTag(curvesList_.front());
+  if(!ge) return;
+
+  // Find the GFace that owns this GEdge
+  GFace *gf = nullptr;
+  for(auto it = gm->firstFace(); it != gm->lastFace(); ++it) {
+    for(auto *e : (*it)->edges()) {
+      if(e == ge) { gf = *it; break; }
+    }
+    if(gf) break;
+  }
+  if(!gf) return;
+
+  // t_end at axisPoint; t_start at the non-axis GVertex endpoint
+  double t_end = arcLengthToParam(ge, axisPoint_[0], axisPoint_[1]);
+
+  GVertex *gvBegin = ge->getBeginVertex();
+  GVertex *gvEnd   = ge->getEndVertex();
+  auto sqd = [&](GVertex *gv) -> double {
+    if(!gv) return 1e30;
+    double dx = gv->x() - axisPoint_[0], dy = gv->y() - axisPoint_[1];
+    return dx*dx + dy*dy;
+  };
+  SPoint2 ptStart;
+  double t_start;
+  if(sqd(gvEnd) > sqd(gvBegin) && gvEnd) {
+    ptStart = SPoint2(gvEnd->x(), gvEnd->y());
+    t_start = arcLengthToParam(ge, gvEnd->x(), gvEnd->y());
+  } else if(gvBegin) {
+    ptStart = SPoint2(gvBegin->x(), gvBegin->y());
+    t_start = arcLengthToParam(ge, gvBegin->x(), gvBegin->y());
+  } else {
+    t_start = ge->parBounds(0).low();
+    GPoint gp0 = ge->point(t_start);
+    ptStart = SPoint2(gp0.x(), gp0.y());
+  }
+  double tSign = (t_end >= t_start) ? 1.0 : -1.0;
+
+  // --- Full profile arc length (numerical integration of |firstDer|) ---
+  double S_total = 0.0;
+  {
+    const int nInt = 200;
+    double dti = (t_end - t_start) / nInt;
+    for(int i = 0; i < nInt; i++)
+      S_total += ge->firstDer(t_start + (i + 0.5) * dti).norm() * std::abs(dti);
+  }
+  if(S_total < 1e-14) {
+    Msg::Error("BoundaryCorner: full profile arc length is zero");
+    return;
+  }
+
+  // --- Compressed section: nbCornerColumns_ columns from axisPoint outward ---
+  int N_corner = std::max(1, nbCornerColumns_);
+  double eps;
+  const double q = lBLeff_ / w0max_;
+  if(N_corner < 2 || q >= 1.0 - 1e-10)
+    eps = 1.0;
+  else
+    eps = std::pow(q, 1.0 / (N_corner - 1));
+
+  double S_corner_nom = (std::abs(eps - 1.0) < 1e-10)
+      ? w0max_ * N_corner
+      : w0max_ * (1.0 - std::pow(eps, N_corner)) / (1.0 - eps);
+
+  // --- Constant-width section: remaining arc covered with w0max_ columns ---
+  double S_rem = S_total - S_corner_nom;
+  int N_constant = (S_rem > 1e-14) ? (int)std::ceil(S_rem / w0max_) : 0;
+  int N = N_constant + N_corner;
+
+  // Scale compressed widths to span S_total - N_constant*w0max_ exactly
+  double S_corner_actual = S_total - (double)N_constant * w0max_;
+  if(S_corner_actual < 1e-14) S_corner_actual = S_total / N_corner;
+  double w0_corner = (std::abs(eps - 1.0) < 1e-10)
+      ? S_corner_actual / N_corner
+      : S_corner_actual * (1.0 - eps) / (1.0 - std::pow(eps, N_corner));
+
+  // --- Build profile points: N_constant uniform columns then N_corner compressed ---
+  std::vector<SPoint2> prof(N + 1);
+  prof[0] = ptStart;
+  for(int i = 1; i <= N; i++) {
+    // constant zone: columns 1..N_constant (indices 0..N_constant-1 from start, widest first)
+    // compressed zone: columns N_constant+1..N (indices 0..N_corner-1 from constant end, widest first)
+    double Li;
+    if(i <= N_constant)
+      Li = w0max_;
+    else
+      Li = w0_corner * std::pow(eps, i - N_constant - 1);
+
+    double t0    = arcLengthToParam(ge, prof[i - 1].x(), prof[i - 1].y());
+    double speed = ge->firstDer(t0).norm();
+    double dt    = (speed > 1e-14) ? Li / speed : 0.0;
+    double t1    = (tSign > 0) ? std::min(t0 + tSign * dt, t_end)
+                               : std::max(t0 + tSign * dt, t_end);
+    GPoint gp    = ge->point(t1);
+    prof[i]      = SPoint2(gp.x(), gp.y());
+  }
+  prof[N] = SPoint2(axisPoint_[0], axisPoint_[1]);
+
+  // --- Build 2D grid: grid[i][k] at column i, height k ---
+  // height k=0 on profile, k=nbLayers_ at BL-top offset
+  std::vector<std::vector<MVertex *>> grid(N + 1,
+    std::vector<MVertex *>(nbLayers_ + 1, nullptr));
+
+  for(int i = 0; i <= N; i++) {
+    double ti = arcLengthToParam(ge, prof[i].x(), prof[i].y());
+    SPoint2 ni = normalAtPoint(ge, ti);
+    for(int k = 0; k <= nbLayers_; k++) {
+      double hk = (k == 0) ? 0.0
+                : (std::abs(ratio_ - 1.0) < 1e-10)
+                    ? h1_ * omega_ * k
+                    : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
+      double x = prof[i].x() + ni.x() * hk;
+      double y = prof[i].y() + ni.y() * hk;
+      MVertex *v = new MVertex(x, y, 0.0, gf);
+      gf->mesh_vertices.push_back(v);
+      grid[i][k] = v;
+    }
+  }
+
+  // --- Exact polygon boundary of the quad block (CCW) ---
+  std::vector<SPoint2> blockPoly;
+  for(int k = 0; k <= nbLayers_; k++)      // left side: profile → outer
+    blockPoly.push_back(SPoint2(grid[0][k]->x(), grid[0][k]->y()));
+  for(int i = 1; i <= N; i++)              // outer boundary: left → right
+    blockPoly.push_back(SPoint2(grid[i][nbLayers_]->x(), grid[i][nbLayers_]->y()));
+  for(int k = nbLayers_ - 1; k >= 0; k--) // right side: outer → profile
+    blockPoly.push_back(SPoint2(grid[N][k]->x(), grid[N][k]->y()));
+  for(int i = N - 1; i >= 1; i--)         // profile: right → left (closes polygon)
+    blockPoly.push_back(SPoint2(grid[i][0]->x(), grid[i][0]->y()));
+
+  auto inPoly = [&](double px, double py) -> bool {
+    bool inside = false;
+    int np = (int)blockPoly.size();
+    for(int a = 0, b = np - 1; a < np; b = a++) {
+      double xa = blockPoly[a].x(), ya = blockPoly[a].y();
+      double xb = blockPoly[b].x(), yb = blockPoly[b].y();
+      if(((ya > py) != (yb > py)) &&
+         (px < (xb - xa) * (py - ya) / (yb - ya) + xa))
+        inside = !inside;
+    }
+    return inside;
+  };
+
+  // --- Delete triangles inside the quad block; track their vertices ---
+  std::set<MVertex *> deletedVSet;
+  {
+    std::vector<MTriangle *> keep;
+    for(auto *tri : gf->triangles) {
+      double cx = (tri->getVertex(0)->x() + tri->getVertex(1)->x() +
+                   tri->getVertex(2)->x()) / 3.0;
+      double cy = (tri->getVertex(0)->y() + tri->getVertex(1)->y() +
+                   tri->getVertex(2)->y()) / 3.0;
+      if(inPoly(cx, cy)) {
+        for(int j = 0; j < 3; j++) deletedVSet.insert(tri->getVertex(j));
+        delete tri;
+      } else {
+        keep.push_back(tri);
+      }
+    }
+    gf->triangles = keep;
+  }
+
+  // --- Delete pre-existing quads inside the BC block (BL fan quads in the BC zone) ---
+  // The BL algorithm generates fan quads at the arc_bl endpoint that span into the
+  // BC zone. Only delete quads whose centroid is inside blockPoly; fan quads that
+  // straddle the left boundary (centroid in the BL zone) are kept — they fill the
+  // visual column at the BL/BC junction.
+  {
+    std::vector<MQuadrangle *> keepQ;
+    for(auto *q : gf->quadrangles) {
+      double cx = (q->getVertex(0)->x() + q->getVertex(1)->x() +
+                   q->getVertex(2)->x() + q->getVertex(3)->x()) / 4.0;
+      double cy = (q->getVertex(0)->y() + q->getVertex(1)->y() +
+                   q->getVertex(2)->y() + q->getVertex(3)->y()) / 4.0;
+      if(inPoly(cx, cy)) {
+        for(int j = 0; j < 4; j++) deletedVSet.insert(q->getVertex(j));
+        delete q;
+      } else {
+        keepQ.push_back(q);
+      }
+    }
+    gf->quadrangles = keepQ;
+  }
+
+  // --- Merge grid[0][k] with adjacent BL outer vertices (conforming interface) ---
+  // The BL last column's right-side outer vertices are at the same positions as
+  // grid[0][1..nbLayers_]. Reusing those vertex objects makes the BL/BC interface
+  // conforming. BL outer vertices may be on a BL-outer GEdge (dim=1), not the GFace,
+  // so we search ALL quad vertices (no entity filter) with a loose tolerance.
+  {
+    const double tol2 = h1_ * h1_ * 0.01;  // (0.1 * h1)^2 — BL/BC positions differ by ~0.0003
+    for(int k = 1; k <= nbLayers_; k++) {
+      MVertex *gv = grid[0][k];
+      double bestD2 = 1e30; MVertex *bestV = nullptr;
+      for(auto *q : gf->quadrangles) {
+        for(int j = 0; j < 4; j++) {
+          MVertex *v = q->getVertex(j);
+          if(v->onWhat() && v->onWhat()->dim() == 0) continue;  // skip model vertices
+          double dx = v->x() - gv->x(), dy = v->y() - gv->y();
+          double d2 = dx*dx + dy*dy;
+          if(d2 < bestD2) { bestD2 = d2; bestV = v; }
+        }
+      }
+      if(bestD2 < tol2) grid[0][k] = bestV;
+    }
+  }
+
+  // --- Expand deletion to include fringe triangles ---
+  // Fringe triangles straddle the BC block boundary: their centroid is outside
+  // blockPoly but they share at least one vertex with the originally deleted zone.
+  // Deleting them gives a clean, gap-free cavity for constrained retriangulation.
+  const std::set<MVertex *> deletedVSet0 = deletedVSet;  // snapshot before expansion
+  {
+    std::vector<MTriangle *> keep;
+    for(auto *tri : gf->triangles) {
+      bool isFringe = false;
+      for(int j = 0; j < 3 && !isFringe; j++)
+        if(deletedVSet0.count(tri->getVertex(j))) isFringe = true;
+      if(isFringe) {
+        for(int j = 0; j < 3; j++) deletedVSet.insert(tri->getVertex(j));
+        delete tri;
+      }
+      else keep.push_back(tri);
+    }
+    gf->triangles = keep;
+  }
+
+  // --- Collect outer cavity boundary edges from the surviving triangulation ---
+  // A boundary edge of the surviving mesh that has at least one vertex in the
+  // deleted zone is a cavity outer boundary edge (it borders the cavity from outside).
+  std::vector<MEdge> constraints;
+  {
+    std::map<MEdge, int, Less_Edge> edgeCnt;
+    for(auto *tri : gf->triangles)
+      for(int j = 0; j < 3; j++)
+        edgeCnt[tri->getEdge(j)]++;
+    for(auto it = edgeCnt.begin(); it != edgeCnt.end(); ++it) {
+      if(it->second == 1 &&
+         (deletedVSet.count(it->first.getVertex(0)) ||
+          deletedVSet.count(it->first.getVertex(1))))
+        constraints.push_back(it->first);
+    }
+  }
+  // BC outer boundary edges (top row of the BC block) — must be in the triangulation.
+  for(int i = 0; i < N; i++)
+    constraints.push_back(MEdge(grid[i][nbLayers_], grid[i + 1][nbLayers_]));
+  // BC left and right column edges — prevent the triangulation from reaching inside
+  // the BC block through the side columns.
+  for(int k = 0; k < nbLayers_; k++) {
+    constraints.push_back(MEdge(grid[0][k],     grid[0][k + 1]));
+    constraints.push_back(MEdge(grid[N][k],     grid[N][k + 1]));
+  }
+
+  // --- Collect cavity vertices for re-triangulation ---
+  // Include all freed vertices (deletedVSet) except those still held by surviving
+  // BL/BC quads, plus the full BC outer boundary and column anchor nodes.
+  std::set<MVertex *> survivingQuadVerts;
+  for(auto *q : gf->quadrangles)
+    for(int j = 0; j < 4; j++) survivingQuadVerts.insert(q->getVertex(j));
+
+  std::set<MVertex *> cavityVSet;
+  for(MVertex *v : deletedVSet)
+    if(!survivingQuadVerts.count(v)) cavityVSet.insert(v);
+  // BC outer boundary and side column nodes are constraint anchors; include them
+  // regardless of whether they appeared in deletedVSet.
+  for(int i = 0; i <= N; i++)
+    cavityVSet.insert(grid[i][nbLayers_]);
+  for(int k = 0; k <= nbLayers_; k++) {
+    cavityVSet.insert(grid[0][k]);
+    cavityVSet.insert(grid[N][k]);
+  }
+
+  std::vector<MVertex *> cavityVerts(cavityVSet.begin(), cavityVSet.end());
+
+  // --- Re-triangulate the cavity using constrained Delaunay ---
+  // delaunayMeshIn2D builds a fresh Delaunay triangulation of cavityVerts and
+  // recovers all constraint edges by diagonal swaps.
+  std::vector<MTriangle *> newTris;
+  delaunayMeshIn2D(cavityVerts, newTris, /*removeBox=*/true, &constraints);
+
+  // Discard any new triangle whose centroid falls inside the BC block (those cells
+  // will be filled by BC quads) and add the rest to the face.
+  int nNewTri = 0;
+  for(auto *tri : newTris) {
+    double cx = (tri->getVertex(0)->x() + tri->getVertex(1)->x() +
+                 tri->getVertex(2)->x()) / 3.0;
+    double cy = (tri->getVertex(0)->y() + tri->getVertex(1)->y() +
+                 tri->getVertex(2)->y()) / 3.0;
+    if(inPoly(cx, cy)) { delete tri; }
+    else { gf->triangles.push_back(tri); nNewTri++; }
+  }
+
+  // --- Insert BC structured quads ---
+  for(int i = 0; i < N; i++)
+    for(int k = 0; k < nbLayers_; k++)
+      gf->quadrangles.push_back(new MQuadrangle(
+        grid[i][k],         grid[i + 1][k],
+        grid[i + 1][k + 1], grid[i][k + 1]));
+
+  // --- Final vertex purge: remove orphaned vertices ---
+  {
+    std::set<MVertex *> keep;
+    for(auto *t : gf->triangles)
+      for(int j = 0; j < 3; j++) keep.insert(t->getVertex(j));
+    for(auto *q : gf->quadrangles)
+      for(int j = 0; j < 4; j++) keep.insert(q->getVertex(j));
+    std::vector<MVertex *> finalV;
+    for(auto *v : gf->mesh_vertices) {
+      if(keep.count(v)) finalV.push_back(v);
+      else delete v;
+    }
+    gf->mesh_vertices = finalV;
+  }
+
+  Msg::Info(
+    "BoundaryCorner: %d columns × %d layers = %d quads, "
+    "cavity retriangulation: %d new triangles (face %d)",
+    N, nbLayers_, N * nbLayers_, nNewTri, gf->tag());
+}
+
+double BoundaryCornerField::operator()(double x, double y, double z,
+                                       GEntity *ge)
+{
+  computeParameters();
+  double dx   = x - axisPoint_[0];
+  double dy   = y - axisPoint_[1];
+  double dist = std::sqrt(dx * dx + dy * dy);
+
+  // Arc-length of the compressed corner section (used as the zone radius)
+  int nc = std::max(1, nbCornerColumns_);
+  double eps_op;
+  const double q_op = (w0max_ > 1e-100) ? lBLeff_ / w0max_ : 1.0;
+  if(nc < 2 || q_op >= 1.0 - 1e-10)
+    eps_op = 1.0;
+  else
+    eps_op = std::pow(q_op, 1.0 / (nc - 1));
+  double S_corner = (std::abs(eps_op - 1.0) < 1e-10)
+      ? w0max_ * nc
+      : w0max_ * (1.0 - std::pow(eps_op, nc)) / (1.0 - eps_op);
+
+  // Within the compressed zone: interpolate from lBLeff_ (at corner) to w0max_
+  if(S_corner > 0.0 && dist < S_corner)
+    return lBLeff_ + (w0max_ - lBLeff_) * dist / S_corner;
+  return 1e22;
+}
+
+// ---------------------------------------------------------------------------
+
 FieldManager::FieldManager()
 {
   map_type_name["Structured"] = new FieldFactoryT<StructuredField>();
   map_type_name["Threshold"] = new FieldFactoryT<ThresholdField>();
   map_type_name["BoundaryLayer"] = new FieldFactoryT<BoundaryLayerField>();
+  map_type_name["BoundaryCorner"] = new FieldFactoryT<BoundaryCornerField>();
   map_type_name["Box"] = new FieldFactoryT<BoxField>();
   map_type_name["Cylinder"] = new FieldFactoryT<CylinderField>();
   map_type_name["Ball"] = new FieldFactoryT<BallField>();

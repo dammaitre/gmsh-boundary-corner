@@ -106,6 +106,7 @@ CTX::CTX() : debugSurface(-1), gamepad(0)
   mesh.secondOrderLinear = mesh.secondOrderIncomplete = 0;
   mesh.preserveNumberingMsh2 = 1;
   mesh.ignorePeriodicity= 1;
+  mesh.boundaryCornerField = 0;
   mesh.lightLines = 2;
 }
 

@@ -26,7 +26,9 @@ __version__ = GMSH_API_VERSION
 
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 libdir = os.path.dirname(os.path.realpath(__file__))
-if platform.system() == "Windows":
+if os.environ.get("GMSH_LIB") and os.path.exists(os.environ["GMSH_LIB"]):
+    libpath = os.environ["GMSH_LIB"]
+elif platform.system() == "Windows":
     libpath = os.path.join(libdir, "gmsh-4.4.dll")
 elif platform.system() == "Darwin":
     libpath = os.path.join(libdir, "libgmsh.dylib")

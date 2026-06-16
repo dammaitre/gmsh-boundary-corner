@@ -1009,6 +1009,8 @@ StringXNumber MeshOptions_Number[] = {
     "Write mesh files in binary format (if possible)" },
   { F|O, "BoundaryLayerFanPoints" , opt_mesh_boundary_layer_fan_points, 5. ,
     "Number of points (per Pi radians) for 2D boundary layer fans" },
+  { F|O, "BoundaryCornerField" , opt_mesh_boundary_corner_field, 0. ,
+    "Tag of the BoundaryCorner field to inject before face meshing (0 = disabled)" },
 
   { F|O, "CgnsImportOrder" , opt_mesh_cgns_import_order , 1. ,
    "Enable the creation of high-order mesh from CGNS structured meshes"
