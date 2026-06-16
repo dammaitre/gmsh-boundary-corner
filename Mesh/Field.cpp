@@ -3290,9 +3290,43 @@ bool BoundaryCornerField::buildForFace(
       }
 
       // Insert chain running toward axisVert (matching the axis edge direction):
-      // vReconnect → grid[N][nbLayers_] → ... → grid[N][1] → axisVert
-      axisEdge->lines.insert(axisEdge->lines.begin() + insertPos,
-                             new MLine(vReconnect, grid[N][nbLayers_]));
+      // vReconnect → [transition verts] → grid[N][nbLayers_] → ... → grid[N][1] → axisVert
+      //
+      // The segment vReconnect→grid[N][nbLayers_] can be orders of magnitude longer
+      // than the adjacent outer BC edge (W0_MIN wide).  Subdivide it geometrically
+      // starting from lBLeff_ at grid[N][nbLayers_] and growing by ratio_ toward
+      // vReconnect, so the Delaunay never sees a huge edge next to a tiny one.
+      {
+        double xO = grid[N][nbLayers_]->x();
+        double xR = vReconnect->x();
+        double segLen = std::abs(xR - xO);
+        double signX  = (xR > xO) ? 1.0 : -1.0;
+        // Build a geometric series from lBLeff_ until we cover segLen.
+        std::vector<double> offsets;
+        double s = lBLeff_, acc = 0.0;
+        while(acc + s < segLen - lBLeff_ * 0.5) {
+          acc += s;
+          offsets.push_back(acc);
+          s *= ratio_;
+        }
+        // Insert transition vertices from grid[N][nbLayers_] toward vReconnect.
+        std::vector<MVertex *> transVerts;
+        for(double off : offsets) {
+          MVertex *tv = new MVertex(xO + signX * off, 0.0, 0.0, axisEdge);
+          axisEdge->mesh_vertices.push_back(tv);
+          transVerts.push_back(tv);
+        }
+        // Build MLines: vReconnect → transVerts.back() → ... → transVerts[0] → grid[N][nbLayers_]
+        MVertex *prev = vReconnect;
+        for(int ti = (int)transVerts.size() - 1; ti >= 0; ti--) {
+          axisEdge->lines.insert(axisEdge->lines.begin() + insertPos,
+                                 new MLine(prev, transVerts[ti]));
+          prev = transVerts[ti];
+          ++insertPos;
+        }
+        axisEdge->lines.insert(axisEdge->lines.begin() + insertPos,
+                               new MLine(prev, grid[N][nbLayers_]));
+      }
       for(int k = nbLayers_ - 1; k >= 1; k--)
         axisEdge->lines.insert(axisEdge->lines.begin() + ++insertPos,
                                new MLine(grid[N][k + 1], grid[N][k]));

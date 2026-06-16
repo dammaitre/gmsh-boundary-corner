@@ -1,20 +1,14 @@
 """
-2dscatter.py — same geometry as 2dplanar.py but the ellipse arcs are replaced
-by discrete/scattered numpy point clouds fed into a gmsh Spline.
+2dbig.py — large-scale version of 2dscatter.py.
 
-Expected issues vs. the analytic arc version:
-  • The spline tangent at nose (A, 0) and tail (-A, 0) is not exactly horizontal
-    because it depends on the slope between the last two sample points, not the
-    true ellipse tangent.  So the outward normal there is not exactly ±x and the
-    BoundaryCorner last-column vertices are not exactly on y = 0.
-  • Increasing N_SCATTER reduces (but never eliminates) the discretisation error.
-
-After meshing, gmshToFoam + checkMesh are run.  foamRun is skipped so the
-experiment can be examined without a full OpenFOAM solve.
+Geometry: ellipse 2×100 m long (A=100), 2×27 m high (B=27).
+Far field: X_FAR=200 m, Y_FAR=150 m.
+BoundaryCorner: H1=1e-4, N_LAY=37.
+Scatter: 200 interior points per arc.
 
 Usage:
-    python 2dscatter.py           # headless
-    python 2dscatter.py --gui     # open the mesh in the gmsh GUI
+    python 2dbig.py           # headless
+    python 2dbig.py --gui     # open the mesh in the gmsh GUI
 """
 
 import sys, os, math, re, subprocess, shutil
@@ -27,26 +21,24 @@ os.environ["GMSH_LIB"] = os.path.join(_root, "build", "libgmsh.so")
 import gmsh
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
-A      = 2.0    # ellipse semi-major axis (axial, x)
-B      = 1.2    # ellipse semi-minor axis (radial, y)
-X_FAR  = 6.0
-Y_FAR  = 3.5
+A      = 100.0   # ellipse semi-major axis (axial, x)
+B      =  27.0   # ellipse semi-minor axis (radial, y)
+X_FAR  = 200.0
+Y_FAR  = 150.0
 
 # ── Scatter sampling ──────────────────────────────────────────────────────────
-# Number of *interior* sample points per arc (endpoints are the GVertex points).
-# Low value → visible tangent error at axis; high value → error is tiny but still
-# present (unlike the analytic arc which is exact).
-N_SCATTER = 12
+N_SCATTER = 200
 
 # ── Mesh sizes ────────────────────────────────────────────────────────────────
-LC_FAR  = 0.30
-LC_BODY = 0.06
-LC_NOSE = 0.03
+LC_FAR  = 100.0
+LC_BODY =   0.50
+LC_NOSE =   0.25
 
 # ── BoundaryCorner parameters ─────────────────────────────────────────────────
-H1     = 0.012
+H1     = 1e-4
+W0_MIN = 5e-4
 RATIO  = 1.15
-N_LAY  = 6
+N_LAY  = 37
 N_COLS = 8
 W0_MAX = LC_BODY
 
@@ -54,13 +46,13 @@ W0_MAX = LC_BODY
 DZ = 1.0
 
 # ── Output ────────────────────────────────────────────────────────────────────
-CASE_DIR = os.path.join(_root, "testing", "ellipse2dscatter_of")
+CASE_DIR = os.path.join(_root, "testing", "ellipse2dbig_of")
 MAX_TIME = 5000
 
 # ─────────────────────────────────────────────────────────────────────────────
 gui = "--gui" in sys.argv
 gmsh.initialize(["gmsh", "-nopopup"])
-gmsh.model.add("ellipse2dscatter")
+gmsh.model.add("ellipse2dbig")
 
 # ── Fixed anchor points ───────────────────────────────────────────────────────
 p_origin = gmsh.model.geo.addPoint(  0,      0,     0, LC_BODY)
@@ -73,14 +65,6 @@ p_far_tr = gmsh.model.geo.addPoint(  X_FAR,  Y_FAR, 0, LC_FAR)
 p_far_tl = gmsh.model.geo.addPoint( -X_FAR,  Y_FAR, 0, LC_FAR)
 
 # ── Build scattered-point arcs ────────────────────────────────────────────────
-# Ellipse parametric: x(t) = A*cos(t), y(t) = B*sin(t)
-#   Front arc:  t in [pi/2 .. 0]  → (0,B) → (A,0)
-#   Back arc:   t in [pi  .. pi/2] → (-A,0) → (0,B)
-#
-# Interior points only — endpoints reuse existing GVertex tags so the topology
-# is correct.  The spline will NOT have an exact horizontal tangent at t=0,π
-# because the slope is estimated from the last two sample points.
-
 def make_arc_points(t_start, t_end, lc=LC_BODY):
     """Return list of interior gmsh point tags sampled uniformly in t."""
     ts = np.linspace(t_start, t_end, N_SCATTER + 2)[1:-1]  # drop endpoints
@@ -141,13 +125,29 @@ def add_bc_field(curves, axis_point):
     gmsh.model.mesh.field.setNumber (f, "NbLayers",        N_LAY)
     gmsh.model.mesh.field.setNumber (f, "NbCornerColumns", N_COLS)
     gmsh.model.mesh.field.setNumber (f, "MaxColumnWidth",  W0_MAX)
+    gmsh.model.mesh.field.setNumber (f, "ColWidth",  W0_MIN)
     return f
 
 bc_front = add_bc_field([arc_front], [A,  0.0])
 bc_back  = add_bc_field([arc_back],  [-A, 0.0])
 
+# ── Body-distance + Threshold — global size ramp from BL edge to far field ────
+H_TOTAL  = H1 * (RATIO**N_LAY - 1.0) / (RATIO - 1.0)  # total BL thickness
+DIST_MAX = 0.15 * 2 * A                                 # 0.15 * chord = 30 m
+
+d_body = gmsh.model.mesh.field.add("Distance")
+gmsh.model.mesh.field.setNumbers(d_body, "EdgesList",     [arc_front, arc_back])
+gmsh.model.mesh.field.setNumber (d_body, "NNodesByEdge",  300)
+
+thresh = gmsh.model.mesh.field.add("Threshold")
+gmsh.model.mesh.field.setNumber(thresh, "IField",  d_body)
+gmsh.model.mesh.field.setNumber(thresh, "LcMin",   LC_BODY)
+gmsh.model.mesh.field.setNumber(thresh, "LcMax",   LC_FAR)
+gmsh.model.mesh.field.setNumber(thresh, "DistMin", H_TOTAL)
+gmsh.model.mesh.field.setNumber(thresh, "DistMax", DIST_MAX)
+
 min_f = gmsh.model.mesh.field.add("Min")
-gmsh.model.mesh.field.setNumbers(min_f, "FieldsList", [bc_front, bc_back])
+gmsh.model.mesh.field.setNumbers(min_f, "FieldsList", [bc_front, bc_back, thresh])
 gmsh.model.mesh.field.setAsBackgroundMesh(min_f)
 
 gmsh.option.setNumber("Mesh.BoundaryCornerField",     bc_front)
@@ -156,29 +156,26 @@ gmsh.option.setNumber("Mesh.CharacteristicLengthMin", H1 * 0.5)
 
 # ── Generate mesh ─────────────────────────────────────────────────────────────
 print(f"\nBuilding spline arcs with {N_SCATTER} interior scatter points per arc.")
-print("Note: spline tangent at axis endpoints is approximate → normal not exactly ±x\n")
+print(f"Ellipse: {2*A}m long × {2*B}m high, far field {X_FAR}m × {Y_FAR}m")
+print(f"BoundaryCorner: H1={H1}, N_LAY={N_LAY}, ratio={RATIO}\n")
 gmsh.model.mesh.generate(3)
 
 # ── Inspect axis-column outer vertex positions ────────────────────────────────
-# The axis-column outer vertices (nose side) must sit exactly on y=0.
-# Expected x positions: A + h1*omega*(ratio^k - 1)/(ratio - 1) for k=1..N_LAY.
 print("\n── Axis-column outer vertex check (nose, y must be 0) ────────────────")
 nodes, coords, _ = gmsh.model.mesh.getNodes()
 coords = np.array(coords).reshape(-1, 3)
 
-# Compute expected x positions for the axis-column outer vertices
 x_expected = []
 for k in range(1, N_LAY + 1):
     hk = H1 * (RATIO**k - 1.0) / (RATIO - 1.0)
     x_expected.append(A + hk)
 
-print(f"  Expected x range: [{x_expected[0]:.4f} .. {x_expected[-1]:.4f}], y=0 for all")
+print(f"  Expected x range: [{x_expected[0]:.6f} .. {x_expected[-1]:.4f}], y=0 for all")
 print()
 
 found = []
 for i in range(len(nodes)):
     x, y = coords[i, 0], coords[i, 1]
-    # Match against expected x positions within a tight tolerance
     for xe in x_expected:
         if abs(x - xe) < H1 * 0.1 and abs(y) < H1 * 0.5:
             found.append((x, y))
@@ -445,5 +442,5 @@ fix_of_boundary(os.path.join(CASE_DIR, "constant", "polyMesh", "boundary"))
 print("\n── checkMesh " + "─" * 61)
 subprocess.run(["checkMesh", "-case", CASE_DIR])
 
-print("\nDone — scatter mesh in", CASE_DIR)
+print("\nDone — big mesh in", CASE_DIR)
 print("(foamRun skipped — examine mesh quality from checkMesh output above)")
