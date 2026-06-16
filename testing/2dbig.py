@@ -29,18 +29,18 @@ Y_FAR  = 150.0   # domain half-height along y
 N_SCATTER = 200  # interior sample points per arc
 
 # ── Mesh sizes ────────────────────────────────────────────────────────────────
-LC_FAR  = 100.0
+LC_FAR  = 10.0
 LC_BODY =   0.50
 #LC_NOSE =   5e-3
-LC_NOSE = .1
+LC_NOSE = .01
 
 # ── BoundaryCorner parameters ─────────────────────────────────────────────────
 H1        = 1e-4    # first BL layer height
 RATIO     = 1.20    # BL growth ratio
 N_LAY     = 37      # number of BL layers
-N_COLS    = 20      # fan columns near axis corner
+N_COLS    = 10      # fan columns near axis corner
 #COL_WIDTH = 5e-3    # ColWidth = 50 * H1 (innermost column arc-length at AxisPoint)
-COL_WIDTH = .1
+COL_WIDTH = .01
 W0_MAX    = LC_BODY # MaxColumnWidth (constant-zone column arc-length)
 
 # ── Extrusion ─────────────────────────────────────────────────────────────────
@@ -129,7 +129,7 @@ def add_bc_field(curves, axis_point):
     gmsh.model.mesh.field.setNumber (f, "NbCornerColumns", N_COLS)
     gmsh.model.mesh.field.setNumber (f, "MaxColumnWidth",  W0_MAX)
     gmsh.model.mesh.field.setNumber (f, "ColWidth",        COL_WIDTH)
-    gmsh.model.mesh.field.setNumber (f, "Omega",           10.0)
+    gmsh.model.mesh.field.setNumber (f, "Omega",           1.0)
     return f
 
 bc_front = add_bc_field([arc_front], [A,  0.0])
