@@ -34,9 +34,9 @@ Y_FAR  = 3.5
 
 # ── Scatter sampling ──────────────────────────────────────────────────────────
 # Number of *interior* sample points per arc (endpoints are the GVertex points).
-# Low value → visible tangent error at axis; high value → error is tiny but still
-# present (unlike the analytic arc which is exact).
-N_SCATTER = 12
+# 1-cos distribution clusters points near both endpoints, minimising tangent
+# error at the nose and tail where the normal accuracy matters most.
+N_SCATTER = 200
 
 # ── Mesh sizes ────────────────────────────────────────────────────────────────
 LC_FAR  = 0.30
@@ -82,8 +82,10 @@ p_far_tl = gmsh.model.geo.addPoint( -X_FAR,  Y_FAR, 0, LC_FAR)
 # because the slope is estimated from the last two sample points.
 
 def make_arc_points(t_start, t_end, lc=LC_BODY):
-    """Return list of interior gmsh point tags sampled uniformly in t."""
-    ts = np.linspace(t_start, t_end, N_SCATTER + 2)[1:-1]  # drop endpoints
+    """Return list of interior gmsh point tags sampled with 1-cos distribution in t."""
+    js = np.arange(1, N_SCATTER + 1)
+    s  = (1.0 - np.cos(np.pi * js / (N_SCATTER + 1))) / 2.0
+    ts = t_start + (t_end - t_start) * s
     tags = []
     for t in ts:
         x = A * math.cos(t)

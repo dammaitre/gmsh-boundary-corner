@@ -25,7 +25,8 @@ X_FAR  = 300.0   # domain half-length along x
 Y_FAR  = 150.0   # domain half-height along y
 
 # ── Scatter sampling ──────────────────────────────────────────────────────────
-N_SCATTER = 40   # interior sample points per arc
+# 1-cos distribution clusters points near both endpoints of each arc.
+N_SCATTER = 200  # interior sample points per arc
 
 # ── Mesh sizes ────────────────────────────────────────────────────────────────
 LC_FAR  = 100.0
@@ -66,8 +67,10 @@ p_far_tl = gmsh.model.geo.addPoint( -X_FAR,  Y_FAR, 0, LC_FAR)
 
 # ── Build scattered-point arcs ────────────────────────────────────────────────
 def make_arc_points(t_start, t_end, lc=LC_BODY):
-    """Return list of interior gmsh point tags sampled uniformly in t."""
-    ts = np.linspace(t_start, t_end, N_SCATTER + 2)[1:-1]
+    """Return list of interior gmsh point tags sampled with 1-cos distribution in t."""
+    js = np.arange(1, N_SCATTER + 1)
+    s  = (1.0 - np.cos(np.pi * js / (N_SCATTER + 1))) / 2.0
+    ts = t_start + (t_end - t_start) * s
     tags = []
     for t in ts:
         x = A * math.cos(t)
