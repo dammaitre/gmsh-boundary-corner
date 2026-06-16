@@ -6,8 +6,9 @@ r=1.2) but the body is a SINGLE spline (nose → top → tail) covered by one
 BoundaryDoubleCorner field instead of two separate BoundaryCorner fields.
 
 Usage:
-    python bigdoublecorner.py           # headless
+    python bigdoublecorner.py           # headless, mesh + checkMesh only
     python bigdoublecorner.py --gui     # open the mesh in the gmsh GUI
+    python bigdoublecorner.py --of      # also run foamRun after checkMesh
 """
 
 import sys, os, math, re, subprocess, shutil
@@ -49,7 +50,8 @@ CASE_DIR = os.path.join(_root, "testing", "bigdoublecorner_of")
 MAX_TIME = 5000
 
 # ─────────────────────────────────────────────────────────────────────────────
-gui = "--gui" in sys.argv
+gui    = "--gui" in sys.argv
+run_of = "--of"  in sys.argv
 gmsh.initialize(["gmsh", "-nopopup"])
 gmsh.model.add("bigdoublecorner")
 
@@ -302,7 +304,7 @@ with open(os.path.join(sys_dir, "fvSolution"), "w") as f:
         "    }\n"
         "}\n\n"
         "SIMPLE\n{\n"
-        "    nNonOrthogonalCorrectors 1;\n"
+        "    nNonOrthogonalCorrectors 2;\n"
         "    residualControl\n    {\n"
         "        p       1e-4;\n"
         "        U       1e-4;\n"
@@ -437,5 +439,18 @@ fix_of_boundary(os.path.join(CASE_DIR, "constant", "polyMesh", "boundary"))
 print("\n── checkMesh " + "─" * 61)
 of_run(f"checkMesh -case {CASE_DIR}")
 
+# ── foamRun ───────────────────────────────────────────────────────────────────
+if run_of:
+    print("\n── potentialFoam " + "─" * 57)
+    of_run(f"potentialFoam -case {CASE_DIR} -noFunctionObjects")
+
+    print("\n── foamRun " + "─" * 63)
+    r = of_run(f"foamRun -case {CASE_DIR}")
+    if r.returncode != 0:
+        print("\nfoamRun failed — check OpenFOAM sourcing and log above.")
+        sys.exit(r.returncode)
+    open(os.path.join(CASE_DIR, "case.foam"), "w").close()
+
 print("\nDone — big-Re double-corner mesh in", CASE_DIR)
-print("(foamRun skipped — examine mesh quality from checkMesh output above)")
+if not run_of:
+    print("(foamRun skipped — pass --of to run the solver)")

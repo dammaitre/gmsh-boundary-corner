@@ -3234,17 +3234,12 @@ bool BoundaryCornerField::buildForFace(
       }
     }
 
-    // alpha=0 at the shoulder column (i=0), alpha=1 at the axis corner (i=N).
-    // Heights blend linearly from BL geometric growth to uniform square spacing.
-    double alpha = (N > 0) ? (double)i / N : 1.0;
     for(int k = 1; k <= nbLayers_; k++) {
       if(useStitch && i == 0 && k < nbLayers_)
         continue;  // intermediate col-0 vertices unused in stitch path
-      double hk_bl = (std::abs(ratio_ - 1.0) < 1e-10)
-                     ? h1_ * omega_ * k
-                     : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
-      double hk_sq = omega_ * hTotal_ / nbLayers_ * k;
-      double hk    = (1.0 - alpha) * hk_bl + alpha * hk_sq;
+      double hk = (std::abs(ratio_ - 1.0) < 1e-10)
+                  ? h1_ * omega_ * k
+                  : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
       grid[i][k] = new MVertex(bx + ni.x() * hk, by + ni.y() * hk, 0.0, outerEnt);
     }
 
@@ -4047,24 +4042,10 @@ bool BoundaryDoubleCornerField::buildForFace(
       by = 0.0;
     }
 
-    // Alpha blending: 1 at both axis columns, 0 in the constant-width mid-section.
-    // Nose corner zone: i = 0..nc  (0=axis col, nc=shoulder)
-    // Tail corner zone: i = N-nc..N (N-nc=shoulder, N=axis col)
-    // Middle:           i = nc..N-nc
-    double alpha;
-    if(i <= nc)
-      alpha = 1.0 - (double)i / nc;
-    else if(i >= N - nc)
-      alpha = (double)(i - (N - nc)) / nc;
-    else
-      alpha = 0.0;
-
     for(int k = 1; k <= nbLayers_; k++) {
-      double hk_bl = (std::abs(ratio_ - 1.0) < 1e-10)
-                     ? h1_ * omega_ * k
-                     : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
-      double hk_sq = omega_ * hTotal_ / nbLayers_ * k;
-      double hk    = (1.0 - alpha) * hk_bl + alpha * hk_sq;
+      double hk = (std::abs(ratio_ - 1.0) < 1e-10)
+                  ? h1_ * omega_ * k
+                  : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
       grid[i][k] = new MVertex(bx + ni.x() * hk, by + ni.y() * hk, 0.0, gf);
     }
   }

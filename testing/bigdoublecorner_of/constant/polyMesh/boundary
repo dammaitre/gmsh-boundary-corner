@@ -25,43 +25,43 @@ FoamFile
     {
         type            empty;
         physicalType    empty;
-        nFaces          65410;
+        nFaces          65406;
         startFace       179225;    }
     symmetry
     {
         type            symmetry;
         physicalType    symmetry;
         nFaces          150;
-        startFace       244635;    }
+        startFace       244631;    }
     outlet
     {
         type            patch;
         physicalType    patch;
         nFaces          15;
-        startFace       244785;    }
+        startFace       244781;    }
     top
     {
         type            patch;
         physicalType    patch;
         nFaces          60;
-        startFace       244800;    }
+        startFace       244796;    }
     inlet
     {
         type            patch;
         physicalType    patch;
         nFaces          15;
-        startFace       244860;    }
+        startFace       244856;    }
     body
     {
         type            wall;
         physicalType    wall;
         nFaces          881;
-        startFace       244875;    }
+        startFace       244871;    }
     symAxis
     {
         type            symmetry;
-        nFaces          76;
-        startFace       245756;    }
+        nFaces          80;
+        startFace       245752;    }
 )
 
 // ************************************************************************* //
