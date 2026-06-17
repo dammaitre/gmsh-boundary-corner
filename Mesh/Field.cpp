@@ -3205,6 +3205,10 @@ bool BoundaryCornerField::buildForFace(
   std::vector<std::vector<MVertex *>> grid(N + 1,
     std::vector<MVertex *>(nbLayers_ + 1, nullptr));
 
+  // Uniform row height that preserves the same total BL thickness as the
+  // geometric series: used as the target for the corner-zone blend.
+  const double h_max_uniform = hTotal_ * omega_ / nbLayers_;
+
   for(int i = 0; i <= N; i++) {
     MVertex *bv = baseVerts[bcStart + i];
     grid[i][0] = bv;
@@ -3234,12 +3238,21 @@ bool BoundaryCornerField::buildForFace(
       }
     }
 
+    // Blend factor: 0 at the outer edge of the corner zone, 1 at the axis column.
+    // Transitions row heights from geometric to uniform over NbCornerColumns columns.
+    double alpha = 0.0;
+    {
+      int i0 = std::max(0, N - nbCornerColumns_);
+      if(N > i0 && i > i0) alpha = double(i - i0) / (N - i0);
+    }
+
     for(int k = 1; k <= nbLayers_; k++) {
       if(useStitch && i == 0 && k < nbLayers_)
         continue;  // intermediate col-0 vertices unused in stitch path
-      double hk = (std::abs(ratio_ - 1.0) < 1e-10)
-                  ? h1_ * omega_ * k
-                  : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
+      double hk_geo = (std::abs(ratio_ - 1.0) < 1e-10)
+                      ? h1_ * omega_ * k
+                      : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
+      double hk = hk_geo + alpha * (h_max_uniform * k - hk_geo);
       grid[i][k] = new MVertex(bx + ni.x() * hk, by + ni.y() * hk, 0.0, outerEnt);
     }
 
@@ -4020,6 +4033,10 @@ bool BoundaryDoubleCornerField::buildForFace(
 
   int nc = nbCornerColumns_;
 
+  // Uniform row height that preserves the same total BL thickness as the
+  // geometric series: used as the target for the corner-zone blend.
+  const double h_max_uniform = hTotal_ * omega_ / nbLayers_;
+
   for(int i = 0; i <= N; i++) {
     MVertex *bv = baseVertForCol(i);
     grid[i][0] = bv;
@@ -4042,10 +4059,23 @@ bool BoundaryDoubleCornerField::buildForFace(
       by = 0.0;
     }
 
+    // Blend factor: 0 at the outer edge of each corner zone, 1 at the axis column.
+    // Transitions row heights from geometric to uniform over NbCornerColumns columns.
+    double alpha = 0.0;
+    if(nc >= 2) {
+      if(includeNose && i < nc)
+        alpha = std::max(alpha, double(nc - 1 - i) / (nc - 1));
+      if(includeTail && i > N - nc)
+        alpha = std::max(alpha, double(i - (N - nc + 1)) / (nc - 1));
+    } else {
+      if(isNoseCol || isTailCol) alpha = 1.0;
+    }
+
     for(int k = 1; k <= nbLayers_; k++) {
-      double hk = (std::abs(ratio_ - 1.0) < 1e-10)
-                  ? h1_ * omega_ * k
-                  : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
+      double hk_geo = (std::abs(ratio_ - 1.0) < 1e-10)
+                      ? h1_ * omega_ * k
+                      : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
+      double hk = hk_geo + alpha * (h_max_uniform * k - hk_geo);
       grid[i][k] = new MVertex(bx + ni.x() * hk, by + ni.y() * hk, 0.0, gf);
     }
   }

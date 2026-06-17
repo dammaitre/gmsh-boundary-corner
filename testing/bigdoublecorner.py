@@ -30,24 +30,24 @@ Y_FAR  = 150.0   # domain half-height along y
 N_SCATTER = 200  # interior sample points on the spline
 
 # ── Mesh sizes ────────────────────────────────────────────────────────────────
-LC_FAR  = 10.0
-LC_BODY =  0.25
+LC_FAR  = 20.0
+LC_BODY =  0.1
 LC_NOSE =  0.01
 
 # ── BoundaryDoubleCorner parameters ──────────────────────────────────────────
-H1        = 1e-4    # first BL layer height
+H1        = 5.8e-4  # first BL layer height  (y+ ≈ 50, wall-function regime)
 RATIO     = 1.20    # BL growth ratio
-N_LAY     = 37      # number of BL layers
-N_COLS    = 10      # compressed columns near each axis corner
+N_LAY     = 29      # number of BL layers — outer cell ≈ LC_BODY for smooth structured/Delaunay interface
+N_COLS    = 20      # compressed columns near each axis corner
 COL_WIDTH = 0.01    # arc-length of innermost column at each corner
-W0_MAX    = LC_BODY # MaxColumnWidth (constant-zone column arc-length)
+W0_MAX    = 0.25    # MaxColumnWidth — must be > LC_BODY to avoid non-ortho at structured/Delaunay interface
 
 # ── Extrusion ─────────────────────────────────────────────────────────────────
 DZ = 1.0
 
 # ── Output ────────────────────────────────────────────────────────────────────
 CASE_DIR = os.path.join(_root, "testing", "bigdoublecorner_of")
-MAX_TIME = 5000
+MAX_TIME = 1000
 
 # ─────────────────────────────────────────────────────────────────────────────
 gui    = "--gui" in sys.argv
@@ -266,17 +266,17 @@ with open(os.path.join(sys_dir, "fvSchemes"), "w") as f:
     f.write(
         foam_header("dictionary", "system", "fvSchemes") +
         "ddtSchemes  { default steadyState; }\n\n"
-        "gradSchemes { default Gauss linear; }\n\n"
+        "gradSchemes { default cellLimited Gauss linear 1; }\n\n"
         "divSchemes\n{\n"
         "    default                              none;\n"
         "    div(phi,U)                           Gauss linearUpwind grad(U);\n"
-        "    div(phi,k)                           Gauss limitedLinear 1;\n"
-        "    div(phi,omega)                       Gauss limitedLinear 1;\n"
+        "    div(phi,k)                           Gauss upwind;\n"
+        "    div(phi,omega)                       Gauss upwind;\n"
         "    div((nuEff*dev(T(grad(U)))))         Gauss linear;\n"
         "}\n\n"
-        "laplacianSchemes { default Gauss linear corrected; }\n\n"
+        "laplacianSchemes { default Gauss linear limited 0.5; }\n\n"
         "interpolationSchemes { default linear; }\n\n"
-        "snGradSchemes { default corrected; }\n\n"
+        "snGradSchemes { default limitedCorrected 0.5; }\n\n"
         "wallDist { method meshWave; }\n"
     )
 
@@ -304,7 +304,7 @@ with open(os.path.join(sys_dir, "fvSolution"), "w") as f:
         "    }\n"
         "}\n\n"
         "SIMPLE\n{\n"
-        "    nNonOrthogonalCorrectors 2;\n"
+        "    nNonOrthogonalCorrectors 3;\n"
         "    residualControl\n    {\n"
         "        p       1e-4;\n"
         "        U       1e-4;\n"
@@ -314,7 +314,7 @@ with open(os.path.join(sys_dir, "fvSolution"), "w") as f:
         "}\n\n"
         "relaxationFactors\n{\n"
         "    fields      { p 0.3; }\n"
-        "    equations   { U 0.7; k 0.7; omega 0.7; }\n"
+        "    equations   { U 0.7; k 0.2; omega 0.2; }\n"
         "}\n"
     )
 
@@ -441,9 +441,6 @@ of_run(f"checkMesh -case {CASE_DIR}")
 
 # ── foamRun ───────────────────────────────────────────────────────────────────
 if run_of:
-    print("\n── potentialFoam " + "─" * 57)
-    of_run(f"potentialFoam -case {CASE_DIR} -noFunctionObjects")
-
     print("\n── foamRun " + "─" * 63)
     r = of_run(f"foamRun -case {CASE_DIR}")
     if r.returncode != 0:

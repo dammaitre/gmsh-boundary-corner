@@ -13,7 +13,7 @@ solver          incompressibleFluid;
 startFrom       startTime;
 startTime       0;
 stopAt          endTime;
-endTime         5000;
+endTime         1000;
 deltaT          1;
 
 writeControl    timeStep;

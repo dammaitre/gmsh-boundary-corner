@@ -9,21 +9,21 @@ FoamFile
 
 ddtSchemes  { default steadyState; }
 
-gradSchemes { default Gauss linear; }
+gradSchemes { default cellLimited Gauss linear 1; }
 
 divSchemes
 {
     default                              none;
     div(phi,U)                           Gauss linearUpwind grad(U);
-    div(phi,k)                           Gauss limitedLinear 1;
-    div(phi,omega)                       Gauss limitedLinear 1;
+    div(phi,k)                           Gauss upwind;
+    div(phi,omega)                       Gauss upwind;
     div((nuEff*dev(T(grad(U)))))         Gauss linear;
 }
 
-laplacianSchemes { default Gauss linear corrected; }
+laplacianSchemes { default Gauss linear limited 0.5; }
 
 interpolationSchemes { default linear; }
 
-snGradSchemes { default corrected; }
+snGradSchemes { default limitedCorrected 0.5; }
 
 wallDist { method meshWave; }
