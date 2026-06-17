@@ -1930,6 +1930,110 @@ bool meshGenerator(GFace *gf, int RECUR_ITER, bool repairSelfIntersecting1dMesh,
     for(auto *v : acv)
       v->setEntity(ae);
 
+  // Purge the z-partner axis edge's stale 1D mesh in the BC column range.
+  //
+  // Root cause of "unused points" in OF checkMesh: the structured extrusion
+  // mesh (numElements=[1]) runs in two phases.
+  //   Phase 1 – volume: grid[N][k] (now reclassified to ae_z0) are displaced
+  //     to z+DZ to form hex top-face vertices at exact BL positions (e.g. x=A+h_k).
+  //   Phase 2 – back-face surface: the back GFace (s_top) is meshed using the
+  //     z-partner axis edge (ae_z1) as its boundary.  ae_z1 carries a pre-BC 1D
+  //     mesh from the 1D meshing step, with vertices at slightly different x than
+  //     the exact BL positions.  The back-face mesher picks those old vertices,
+  //     producing back-face quads that disagree with the hex top faces on one
+  //     vertex per discrepant layer per corner.  gmshToFoam then can't match the
+  //     surface elements to the cell faces → the old vertex is an unused OF point.
+  //
+  // Fix: before the 3D sweep runs, strip ae_z1's 1D mesh in [xNose, xOuter].
+  // The 3D sweeper repopulates that range with exact-position chain vertices,
+  // so both back-face quads and hex top faces end up referencing the same node.
+  for(auto &[ae, acv] : axisReclassify) {
+    if(acv.empty()) continue;
+
+    // Nose GVertex on ae: endpoint closest to acv[0] (= grid[N][1]).
+    GVertex *axisGV = nullptr;
+    {
+      GVertex *bv = ae->getBeginVertex(), *ev = ae->getEndVertex();
+      if(bv && ev)
+        axisGV = (std::abs(bv->x() - acv[0]->x()) <
+                  std::abs(ev->x() - acv[0]->x())) ? bv : ev;
+    }
+    if(!axisGV) continue;
+
+    double xNose  = axisGV->x();
+    double xOuter = acv.back()->x();
+    double xMin   = std::min(xNose, xOuter);
+    double xMax   = std::max(xNose, xOuter);
+
+    // Far GVertex on ae (the one that's not the corner).
+    GVertex *farGV = (ae->getBeginVertex() == axisGV)
+                     ? ae->getEndVertex() : ae->getBeginVertex();
+    if(!farGV) continue;
+
+    // Rise edge: connects axisGV to its z-partner GVertex (same xy, different z).
+    GVertex *axisGV_z1 = nullptr;
+    GEdge   *riseEdge  = nullptr;
+    for(auto *e : axisGV->edges()) {
+      GVertex *bv = e->getBeginVertex(), *ev = e->getEndVertex();
+      GVertex *other = (bv == axisGV) ? ev : bv;
+      if(other &&
+         std::abs(other->x() - axisGV->x()) < 1e-10 &&
+         std::abs(other->y() - axisGV->y()) < 1e-10 &&
+         std::abs(other->z() - axisGV->z()) > 1e-10) {
+        axisGV_z1 = other;
+        riseEdge  = e;
+        break;
+      }
+    }
+    if(!axisGV_z1) continue;
+
+    // Z-partner axis edge: the edge adjacent to axisGV_z1 whose far endpoint
+    // is the z=1 counterpart of farGV (same x,y as farGV, different z).
+    // Using farGV's coordinates avoids mistaking the arc-profile edge, which
+    // also terminates at y≈0 at the tail vertex and would pass a naive y<eps test.
+    GEdge *ae_z1 = nullptr;
+    for(auto *e : axisGV_z1->edges()) {
+      if(e == riseEdge) continue;
+      GVertex *bv = e->getBeginVertex(), *ev = e->getEndVertex();
+      GVertex *other = (bv == axisGV_z1) ? ev : bv;
+      if(other &&
+         std::abs(other->x() - farGV->x()) < 1e-10 &&
+         std::abs(other->y() - farGV->y()) < 1e-10) {
+        ae_z1 = e;
+        break;
+      }
+    }
+    if(!ae_z1) continue;
+
+    // Remove ae_z1's MLines that have at least one vertex in [xMin, xMax].
+    {
+      std::vector<MLine *> keep;
+      keep.reserve(ae_z1->lines.size());
+      for(auto *ml : ae_z1->lines) {
+        MVertex *va = ml->getVertex(0), *vb = ml->getVertex(1);
+        bool aIn = va->x() >= xMin - 1e-14 && va->x() <= xMax + 1e-14;
+        bool bIn = vb->x() >= xMin - 1e-14 && vb->x() <= xMax + 1e-14;
+        if(!aIn && !bIn)
+          keep.push_back(ml);
+        else
+          delete ml;
+      }
+      ae_z1->lines = std::move(keep);
+    }
+
+    // Remove ae_z1's interior mesh_vertices in [xMin, xMax].
+    // Deliberately do NOT free: explicitly deleting them here causes a crash
+    // in gmsh.finalize() (the source of the double-free is unclear but
+    // reproducible). The orphan leak is negligible (~8 verts per corner).
+    {
+      auto &mv = ae_z1->mesh_vertices;
+      auto rmB = std::remove_if(mv.begin(), mv.end(),
+        [xMin, xMax](MVertex *v) {
+          return v->x() >= xMin - 1e-14 && v->x() <= xMax + 1e-14;
+        });
+      mv.erase(rmB, mv.end());
+    }
+  }
   return true;
 }
 
