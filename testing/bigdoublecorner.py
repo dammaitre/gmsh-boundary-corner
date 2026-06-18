@@ -47,7 +47,7 @@ DZ = 1.0
 
 # ── Output ────────────────────────────────────────────────────────────────────
 CASE_DIR = os.path.join(_root, "testing", "bigdoublecorner_of")
-MAX_TIME = 1000
+MAX_TIME = 200
 
 # ─────────────────────────────────────────────────────────────────────────────
 gui    = "--gui" in sys.argv
@@ -269,7 +269,7 @@ with open(os.path.join(sys_dir, "fvSchemes"), "w") as f:
         "gradSchemes { default cellLimited Gauss linear 1; }\n\n"
         "divSchemes\n{\n"
         "    default                              none;\n"
-        "    div(phi,U)                           Gauss linearUpwind grad(U);\n"
+        "    div(phi,U)                           Gauss upwind;\n"
         "    div(phi,k)                           Gauss upwind;\n"
         "    div(phi,omega)                       Gauss upwind;\n"
         "    div((nuEff*dev(T(grad(U)))))         Gauss linear;\n"
@@ -284,6 +284,12 @@ with open(os.path.join(sys_dir, "fvSolution"), "w") as f:
     f.write(
         foam_header("dictionary", "system", "fvSolution") +
         "solvers\n{\n"
+        "    Phi\n    {\n"
+        "        solver          GAMG;\n"
+        "        smoother        GaussSeidel;\n"
+        "        tolerance       1e-7;\n"
+        "        relTol          0.01;\n"
+        "    }\n"
         "    p\n    {\n"
         "        solver          GAMG;\n"
         "        smoother        GaussSeidel;\n"
@@ -313,8 +319,8 @@ with open(os.path.join(sys_dir, "fvSolution"), "w") as f:
         "    }\n"
         "}\n\n"
         "relaxationFactors\n{\n"
-        "    fields      { p 0.3; }\n"
-        "    equations   { U 0.7; k 0.2; omega 0.2; }\n"
+        "    fields      { p 0.2; }\n"
+        "    equations   { U 0.5; k 0.1; omega 0.1; }\n"
         "}\n"
     )
 
@@ -438,6 +444,14 @@ fix_of_boundary(os.path.join(CASE_DIR, "constant", "polyMesh", "boundary"))
 # ── checkMesh ─────────────────────────────────────────────────────────────────
 print("\n── checkMesh " + "─" * 61)
 of_run(f"checkMesh -case {CASE_DIR}")
+
+# ── potentialFoam initialization ──────────────────────────────────────────────
+if run_of:
+    print("\n── potentialFoam " + "─" * 57)
+    r = of_run(f"potentialFoam -writePhi -case {CASE_DIR}")
+    if r.returncode != 0:
+        print("\npotentialFoam failed.")
+        sys.exit(r.returncode)
 
 # ── foamRun ───────────────────────────────────────────────────────────────────
 if run_of:
