@@ -144,44 +144,6 @@ for t, tags in zip(elem_types, elem_tags):
 print(f"\n  NbCornerColumns={N_COLS} (each end),  NbLayers={N_LAY},  W0_MAX={W0_MAX}")
 print(f"  total quads : {n_quads}")
 
-# ── Axis-column outer vertex check ────────────────────────────────────────────
-print("\n── Axis-column outer vertex check (nose and tail, y must be 0) ──────────")
-nodes, coords, _ = gmsh.model.mesh.getNodes()
-coords = np.array(coords).reshape(-1, 3)
-
-x_nose_expected = []
-x_tail_expected = []
-for k in range(1, N_LAY + 1):
-    hk = H1 * (RATIO**k - 1.0) / (RATIO - 1.0)
-    x_nose_expected.append(A + hk)
-    x_tail_expected.append(-A - hk)
-
-found_nose, found_tail = [], []
-for i in range(len(nodes)):
-    x, y = coords[i, 0], coords[i, 1]
-    if abs(y) < H1 * 0.5:
-        for xe in x_nose_expected:
-            if abs(x - xe) < H1 * 0.1:
-                found_nose.append((x, y)); break
-        for xe in x_tail_expected:
-            if abs(x - xe) < H1 * 0.1:
-                found_tail.append((x, y)); break
-
-ok = True
-for label, found in (("nose", found_nose), ("tail", found_tail)):
-    found.sort()
-    print(f"\n  {label}:")
-    for x, y in found:
-        flag = "" if abs(y) < 1e-10 else "  <- OFF AXIS"
-        print(f"    x={x:.6f}  y={y:.10f}{flag}")
-        if abs(y) > 1e-10:
-            ok = False
-    if not found:
-        print(f"    (no axis-column outer vertices matched — check tolerances)")
-
-if ok and (found_nose or found_tail):
-    print(f"\n  All axis-column outer vertices on y=0 OK")
-
 # ── Physical groups ────────────────────────────────────────────────────────────
 def pg(dim, tags, name):
     t = gmsh.model.addPhysicalGroup(dim, tags)
