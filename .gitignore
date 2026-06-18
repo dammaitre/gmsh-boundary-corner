@@ -17,3 +17,4 @@ doc/doxygen/html
 ## CLion directories
 .idea
 cmake-build-*
+.git-rewrite/
