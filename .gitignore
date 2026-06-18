@@ -1,4 +1,6 @@
+testing/ellipse_*
 testing/ellipse*
+testing/doublecorner_*
 bin*
 lib
 build
