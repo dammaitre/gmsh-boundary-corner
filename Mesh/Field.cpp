@@ -4017,10 +4017,17 @@ bool BoundaryDoubleCornerField::buildForFace(
     return baseVerts[startIdx + i];
   };
 
+  // Origin-independent reference for "outward" direction: compare nose/tail x
+  // to the profile's own mean x rather than to x=0, so a geometry shifted away
+  // from the origin (e.g. body starting at x=1) still gets the correct sign.
+  double xMeanProfile = 0.0;
+  for(auto *v : baseVerts) xMeanProfile += v->x();
+  xMeanProfile /= (double)baseVerts.size();
+
   // Determine normal orientation using nose point (must point outward from axis).
   bool flipNormal = false;
   {
-    double xN = nosePoint_[0];
+    double xN = nosePoint_[0] - xMeanProfile;
     if(std::abs(xN) > 1e-10) {
       double tN = arcLengthToParam(ge, noseVert->x(), noseVert->y());
       SPoint2 nN = normalAtPoint(ge, tN);
@@ -4050,11 +4057,11 @@ bool BoundaryDoubleCornerField::buildForFace(
     bool isNoseCol = (includeNose && i == 0);
     bool isTailCol = (includeTail && i == N);
     if(isNoseCol) {
-      double signX = (nosePoint_[0] >= 0.0) ? 1.0 : -1.0;
+      double signX = (nosePoint_[0] >= xMeanProfile) ? 1.0 : -1.0;
       ni = SPoint2(signX, 0.0);
       by = 0.0;
     } else if(isTailCol) {
-      double signX = (tailPoint_[0] >= 0.0) ? 1.0 : -1.0;
+      double signX = (tailPoint_[0] >= xMeanProfile) ? 1.0 : -1.0;
       ni = SPoint2(signX, 0.0);
       by = 0.0;
     }
