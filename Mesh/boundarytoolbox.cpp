@@ -1123,27 +1123,6 @@ bool BoundaryDoubleCornerField::buildForFace(
     }
   }
 
-  // DEBUG (temporary, mesh-quality investigation 2026-06-19): dump base
-  // vertex spacing and outer-row (k=nbLayers_) vertex spacing for every
-  // column, so near-coincident points between adjacent columns can be
-  // spotted directly. Enabled via BDC_DEBUG=1 env var.
-  if(std::getenv("BDC_DEBUG")) {
-    for(int i = 0; i < N; i++) {
-      MVertex *b0 = grid[i][0], *b1 = grid[i + 1][0];
-      double dBase = std::hypot(b1->x() - b0->x(), b1->y() - b0->y());
-      MVertex *o0 = grid[i][nbLayers_], *o1 = grid[i + 1][nbLayers_];
-      double dOuter = std::hypot(o1->x() - o0->x(), o1->y() - o0->y());
-      MVertex *r0 = grid[i][1], *r1 = grid[i + 1][1];
-      double dRow1 = std::hypot(r1->x() - r0->x(), r1->y() - r0->y());
-      Msg::Info("BDC_DEBUG col %d->%d: base=(%.6f,%.6f)->(%.6f,%.6f) dBase=%.6e  "
-                "row1=(%.6f,%.6f)->(%.6f,%.6f) dRow1=%.6e  "
-                "outer=(%.6f,%.6f)->(%.6f,%.6f) dOuter=%.6e",
-                i, i + 1, b0->x(), b0->y(), b1->x(), b1->y(), dBase,
-                r0->x(), r0->y(), r1->x(), r1->y(), dRow1,
-                o0->x(), o0->y(), o1->x(), o1->y(), dOuter);
-    }
-  }
-
   // Subdivide axis edges and record for later reclassification.
   if(includeNose) {
     std::vector<MVertex *> noseColVerts(nbLayers_);
