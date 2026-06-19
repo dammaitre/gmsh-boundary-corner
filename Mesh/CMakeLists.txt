@@ -30,6 +30,7 @@ set(SRC
   delaunay3d.cpp
   DivideAndConquer.cpp
   Field.cpp
+  boundarytoolbox.cpp
   filterElements.cpp
   gmshCrossFields.cpp
   automaticMeshSizeField.cpp

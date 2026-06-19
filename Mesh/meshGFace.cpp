@@ -38,6 +38,7 @@
 #include "boundaryLayersData.h"
 #include "filterElements.h"
 #include "Field.h"
+#include "boundarytoolbox.h"
 
 // define this to use the old initial delaunay
 #define OLD_CODE_DELAUNAY 1
