@@ -301,8 +301,43 @@ int MeshExtrudedSurface(
 
   Msg::Info("Meshing surface %d (extruded)", gf->tag());
 
-  // build an rtree with all the vertices on the boundary of the face gf
-  MVertexRTree pos(CTX::instance()->geom.tolerance * CTX::instance()->lc);
+  // resolve the source entity first, so the rtree's matching tolerance can
+  // be sized off its own mesh's local feature size (smallest element edge)
+  // rather than the global model bounding box -- see localVertexRTreeTolerance
+  // in MVertexRTree.h for why this matters (thin boundary-layer elements
+  // inside a much larger far-field domain).
+  GEdge *fromEdge = 0;
+  GFace *fromFace = 0;
+  if(ep->geo.Mode == EXTRUDED_ENTITY) {
+    fromEdge = gf->model()->getEdgeByTag(std::abs(ep->geo.Source));
+    if(!fromEdge) {
+      Msg::Error("Unknown source curve %d for extrusion", ep->geo.Source);
+      return 0;
+    }
+  }
+  else {
+    fromFace = gf->model()->getFaceByTag(std::abs(ep->geo.Source));
+    if(!fromFace) {
+      Msg::Error("Unknown source surface %d for extrusion", ep->geo.Source);
+      return 0;
+    }
+    else if(fromFace->geomType() != GEntity::DiscreteSurface &&
+            fromFace->meshStatistics.status != GFace::DONE) {
+      // cannot mesh the face yet (the source face is not meshed):
+      // will do it later
+      return 1;
+    }
+  }
+
+  double minLen2 = DBL_MAX;
+  if(fromEdge) accumulateMinEdgeLength2(fromEdge->lines, minLen2);
+  if(fromFace) {
+    accumulateMinEdgeLength2(fromFace->triangles, minLen2);
+    accumulateMinEdgeLength2(fromFace->quadrangles, minLen2);
+  }
+  MVertexRTree pos(localVertexRTreeTolerance(minLen2));
+
+  // insert all the vertices on the boundary of the face gf
   std::vector<GEdge *> const &edges = gf->edges();
   std::vector<GEdge *>::const_iterator it = edges.begin();
   while(it != edges.end()) {
@@ -320,30 +355,10 @@ int MeshExtrudedSurface(
     pos.insert(gf->mesh_vertices);
   }
 
-  if(ep->geo.Mode == EXTRUDED_ENTITY) {
-    // surface is extruded from a curve
-    GEdge *from = gf->model()->getEdgeByTag(std::abs(ep->geo.Source));
-    if(!from) {
-      Msg::Error("Unknown source curve %d for extrusion", ep->geo.Source);
-      return 0;
-    }
-    extrudeMesh(from, gf, pos, constrainedEdges);
-  }
-  else {
-    // surface is a copy of another surface (the "top" of the extrusion)
-    GFace *from = gf->model()->getFaceByTag(std::abs(ep->geo.Source));
-    if(!from) {
-      Msg::Error("Unknown source surface %d for extrusion", ep->geo.Source);
-      return 0;
-    }
-    else if(from->geomType() != GEntity::DiscreteSurface &&
-            from->meshStatistics.status != GFace::DONE) {
-      // cannot mesh the face yet (the source face is not meshed):
-      // will do it later
-      return 1;
-    }
-    copyMesh(from, gf, pos);
-  }
+  if(fromEdge)
+    extrudeMesh(fromEdge, gf, pos, constrainedEdges);
+  else
+    copyMesh(fromFace, gf, pos);
 
   gf->meshStatistics.status = GFace::DONE;
   return 1;

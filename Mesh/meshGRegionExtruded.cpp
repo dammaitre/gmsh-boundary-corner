@@ -220,23 +220,27 @@ static void extrudeMesh(GFace *from, GRegion *to, MVertexRTree &pos)
   }
 }
 
-static void insertAllVertices(GRegion *gr, MVertexRTree &pos)
+static void collectAllVertices(GRegion *gr, std::vector<MVertex *> &out)
 {
-  pos.insert(gr->mesh_vertices);
+  out.insert(out.end(), gr->mesh_vertices.begin(), gr->mesh_vertices.end());
   std::vector<GFace *> faces = gr->faces();
   std::vector<GFace *>::iterator itf = faces.begin();
   while(itf != faces.end()) {
-    pos.insert((*itf)->mesh_vertices);
+    out.insert(out.end(), (*itf)->mesh_vertices.begin(),
+              (*itf)->mesh_vertices.end());
     std::vector<MVertex *> embedded = (*itf)->getEmbeddedMeshVertices();
-    pos.insert(embedded);
+    out.insert(out.end(), embedded.begin(), embedded.end());
     std::vector<GEdge *> const &edges = (*itf)->edges();
     std::vector<GEdge *>::const_iterator ite = edges.begin();
     while(ite != edges.end()) {
-      pos.insert((*ite)->mesh_vertices);
+      out.insert(out.end(), (*ite)->mesh_vertices.begin(),
+                (*ite)->mesh_vertices.end());
       if((*ite)->getBeginVertex())
-        pos.insert((*ite)->getBeginVertex()->mesh_vertices);
+        out.insert(out.end(), (*ite)->getBeginVertex()->mesh_vertices.begin(),
+                  (*ite)->getBeginVertex()->mesh_vertices.end());
       if((*ite)->getEndVertex())
-         pos.insert((*ite)->getEndVertex()->mesh_vertices);
+        out.insert(out.end(), (*ite)->getEndVertex()->mesh_vertices.begin(),
+                  (*ite)->getEndVertex()->mesh_vertices.end());
       ++ite;
     }
     ++itf;
@@ -259,16 +263,25 @@ void meshGRegionExtruded::operator()(GRegion *gr)
   deMeshGRegion dem;
   dem(gr);
 
-  // build an rtree with all the vertices on the boundary of gr
-  MVertexRTree pos(CTX::instance()->geom.tolerance * CTX::instance()->lc);
-  insertAllVertices(gr, pos);
-
   // volume is extruded from a surface
   GFace *from = gr->model()->getFaceByTag(std::abs(ep->geo.Source));
   if(!from) {
     Msg::Error("Unknown source surface %d for extrusion", ep->geo.Source);
     return;
   }
+
+  // size the rtree's matching tolerance off the source surface's own mesh
+  // feature size (smallest element edge), not the global model bounding
+  // box -- see localVertexRTreeTolerance in MVertexRTree.h
+  double minLen2 = DBL_MAX;
+  accumulateMinEdgeLength2(from->triangles, minLen2);
+  accumulateMinEdgeLength2(from->quadrangles, minLen2);
+  MVertexRTree pos(localVertexRTreeTolerance(minLen2));
+
+  // build an rtree with all the vertices on the boundary of gr
+  std::vector<MVertex *> boundaryVerts;
+  collectAllVertices(gr, boundaryVerts);
+  pos.insert(boundaryVerts);
 
   extrudeMesh(from, gr, pos);
 
@@ -478,13 +491,19 @@ int SubdivideExtrudedMesh(GModel *m)
   std::vector<GRegion *> regions_quadToTri;
 #endif
 
-  MVertexRTree pos(CTX::instance()->geom.tolerance * CTX::instance()->lc);
+  std::vector<MVertex *> allVerts;
+  double minLen2 = DBL_MAX;
   for(GModel::riter it = m->firstRegion(); it != m->lastRegion(); it++) {
     ExtrudeParams *ep = (*it)->meshAttributes.extrude;
     if(ep && ep->mesh.ExtrudeMesh && ep->geo.Mode == EXTRUDED_ENTITY &&
        !ep->mesh.Recombine) {
       regions.push_back(*it);
-      insertAllVertices(*it, pos);
+      collectAllVertices(*it, allVerts);
+      std::vector<GFace *> faces = (*it)->faces();
+      for(std::size_t i = 0; i < faces.size(); i++) {
+        accumulateMinEdgeLength2(faces[i]->triangles, minLen2);
+        accumulateMinEdgeLength2(faces[i]->quadrangles, minLen2);
+      }
     }
 #if defined(HAVE_QUADTRI)
     // create vector of valid quadToTri regions...not all will necessarily be
@@ -498,6 +517,9 @@ int SubdivideExtrudedMesh(GModel *m)
 
   if(regions.empty()) return 0;
   Msg::Info("Subdividing extruded mesh");
+
+  MVertexRTree pos(localVertexRTreeTolerance(minLen2));
+  pos.insert(allVerts);
 
   // create edges on lateral sides of "prisms"
   std::set<std::pair<MVertex *, MVertex *> > edges;
@@ -566,9 +588,16 @@ int SubdivideExtrudedMesh(GModel *m)
   // won't mesh the region (should already be done in ExtrudeMesh).
   for(std::size_t i = 0; i < regions_quadToTri.size(); i++) {
     GRegion *gr = regions_quadToTri[i];
-    MVertexRTree pos_local(CTX::instance()->geom.tolerance *
-                           CTX::instance()->lc);
-    insertAllVertices(gr, pos_local);
+    double localMinLen2 = DBL_MAX;
+    std::vector<GFace *> grFaces = gr->faces();
+    for(std::size_t j = 0; j < grFaces.size(); j++) {
+      accumulateMinEdgeLength2(grFaces[j]->triangles, localMinLen2);
+      accumulateMinEdgeLength2(grFaces[j]->quadrangles, localMinLen2);
+    }
+    std::vector<MVertex *> localVerts;
+    collectAllVertices(gr, localVerts);
+    MVertexRTree pos_local(localVertexRTreeTolerance(localMinLen2));
+    pos_local.insert(localVerts);
     meshQuadToTriRegionAfterGlobalSubdivide(gr, &edges, pos_local);
   }
 #endif
