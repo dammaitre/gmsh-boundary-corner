@@ -51,7 +51,8 @@ LC_NOSE =  0.01
 H1        = 5.8e-4  # first BL layer height  (y+ ≈ 50, wall-function regime)
 RATIO     = 1.20    # BL growth ratio
 N_LAY     = 29      # number of BL layers — outer cell ≈ LC_BODY for smooth structured/Delaunay interface
-N_COLS    = 20      # compressed columns near each axis corner
+N_COLS_LEN    = 20  # geometric-length columns (outer part of corner zone)
+N_COLS_HEIGHT = 100   # height-blend columns (inner part, at the axis), constant ColWidth
 COL_WIDTH = 0.01    # arc-length of innermost column at each corner
 W0_MAX    = 0.25    # MaxColumnWidth — must be > LC_BODY to avoid non-ortho at structured/Delaunay interface
 
@@ -129,7 +130,8 @@ gmsh.model.mesh.field.setNumbers(bdc, "TailPoint",       [-A, 0.0])
 gmsh.model.mesh.field.setNumber (bdc, "Size",            H1)
 gmsh.model.mesh.field.setNumber (bdc, "Ratio",           RATIO)
 gmsh.model.mesh.field.setNumber (bdc, "NbLayers",        N_LAY)
-gmsh.model.mesh.field.setNumber (bdc, "NbCornerColumns", N_COLS)
+gmsh.model.mesh.field.setNumber (bdc, "NbLengthControl", N_COLS_LEN)
+gmsh.model.mesh.field.setNumber (bdc, "NbHeightControl", N_COLS_HEIGHT)
 gmsh.model.mesh.field.setNumber (bdc, "MaxColumnWidth",  W0_MAX)
 gmsh.model.mesh.field.setNumber (bdc, "ColWidth",        COL_WIDTH)
 
@@ -141,7 +143,8 @@ gmsh.option.setNumber("Mesh.CharacteristicLengthMin", H1 * 0.5)
 # ── Generate mesh ─────────────────────────────────────────────────────────────
 print(f"\nBuilding spline with {N_SCATTER} interior scatter points.")
 print(f"Ellipse: {2*A}m × {2*B}m  (L={L}m)  |  BL: h1={H1:.0e}, {N_LAY} layers, r={RATIO}")
-print(f"ColWidth={COL_WIDTH:.0e}, NbCornerColumns={N_COLS}, W0_MAX={W0_MAX}")
+print(f"ColWidth={COL_WIDTH:.0e}, NbLengthControl={N_COLS_LEN}, "
+      f"NbHeightControl={N_COLS_HEIGHT}, W0_MAX={W0_MAX}")
 print(f"Domain: upstream={X_UP-A:.0f}m (={ (X_UP-A)/L:.1f}L), "
       f"downstream={X_DOWN-A:.0f}m (={ (X_DOWN-A)/L:.1f}L), "
       f"height={Y_FAR:.0f}m (={Y_FAR/L:.1f}L), LC_FAR={LC_FAR:.1f}m\n")
@@ -160,7 +163,8 @@ for t, tags in zip(elem_types, elem_tags):
     if t == 3: n_quads = len(tags)
     if t == 2: n_tris  = len(tags)
 
-print(f"\n  NbCornerColumns={N_COLS} (each end),  NbLayers={N_LAY},  W0_MAX={W0_MAX}")
+print(f"\n  NbLengthControl={N_COLS_LEN}, NbHeightControl={N_COLS_HEIGHT} (each end),  "
+      f"NbLayers={N_LAY},  W0_MAX={W0_MAX}")
 print(f"  total quads : {n_quads}")
 
 # ── Physical groups ────────────────────────────────────────────────────────────

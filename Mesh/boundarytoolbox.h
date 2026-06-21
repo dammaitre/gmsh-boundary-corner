@@ -50,7 +50,8 @@ private:
   double h1_;                          // Size            : hauteur 1ère rangée BL
   double ratio_;                       // Ratio           : raison progression BL
   int    nbLayers_;                    // NbLayers        : nombre de rangées BL
-  int    nbCornerColumns_;             // NbCornerColumns : compressed columns near corner
+  int    nbLengthControl_;             // NbLengthControl : geometric-length columns (outer part of corner zone)
+  int    nbHeightControl_;             // NbHeightControl : height-blend columns (inner part, at the axis)
   double w0max_;                       // MaxColumnWidth  : arc max colonne (transition width)
   double lBL_;                         // ColWidth : arc dernière colonne à l'AxisPoint ; -1 = Size
   double omega_;                       // Omega           : facteur hauteur (défaut 1.0)
@@ -96,7 +97,7 @@ private:
   std::list<double> nosePointList_;   // NosePoint [x_nose, 0.0]
   std::list<double> tailPointList_;   // TailPoint [x_tail, 0.0]
   double h1_, ratio_, w0max_, lBL_, omega_;
-  int    nbLayers_, nbCornerColumns_, skipAxisColumn_;
+  int    nbLayers_, nbLengthControl_, nbHeightControl_, skipAxisColumn_;
 
   double nosePoint_[2], tailPoint_[2];
   double lBLeff_, hTotal_;

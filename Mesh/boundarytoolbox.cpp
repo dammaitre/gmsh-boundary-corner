@@ -34,7 +34,7 @@ std::string BoundaryCornerField::getDescription()
 
 BoundaryCornerField::BoundaryCornerField()
   : h1_(1e-3), ratio_(1.15), nbLayers_(30),
-    nbCornerColumns_(10), w0max_(0.1), lBL_(-1.0), omega_(1.0),
+    nbLengthControl_(5), nbHeightControl_(5), w0max_(0.1), lBL_(-1.0), omega_(1.0),
     skipAxisColumn_(0), lBLeff_(1e-3), hTotal_(0.0)
 {
   axisPoint_[0] = axisPoint_[1] = 0.0;
@@ -49,10 +49,18 @@ BoundaryCornerField::BoundaryCornerField()
     ratio_, "Geometric growth ratio between successive BL rows", &update_needed);
   options["NbLayers"] = new FieldOptionInt(
     nbLayers_, "Number of BL rows", &update_needed);
-  options["NbCornerColumns"] = new FieldOptionInt(
-    nbCornerColumns_,
-    "Number of arc-length-compressed columns from AxisPoint outward.  "
-    "Beyond these columns the column arc-length is held constant at MaxColumnWidth.",
+  options["NbLengthControl"] = new FieldOptionInt(
+    nbLengthControl_,
+    "Number of columns, outer part of the corner zone, over which the column "
+    "arc-length transitions geometrically from MaxColumnWidth down to ColWidth.  "
+    "Row heights in this region stay BL-geometric (no blending).",
+    &update_needed);
+  options["NbHeightControl"] = new FieldOptionInt(
+    nbHeightControl_,
+    "Number of columns, inner part of the corner zone (adjacent to AxisPoint), "
+    "over which the column arc-length is held constant at ColWidth while the "
+    "row heights blend from BL-geometric to a uniform (linspace) distribution, "
+    "reaching full uniform height at AxisPoint.",
     &update_needed);
   options["MaxColumnWidth"] = new FieldOptionDouble(
     w0max_,
@@ -189,7 +197,7 @@ bool BoundaryCornerField::buildForFace(
       if(adj == ge) continue;
       GVertex *other = (adj->getBeginVertex() == axisGV) ? adj->getEndVertex()
                                                           : adj->getBeginVertex();
-      if(other && std::abs(other->y()) < 1e-10) { axisEdge = adj; break; }
+      if(other && std::abs(other->y() - axisPoint_[1]) < 1e-10) { axisEdge = adj; break; }
     }
   }
   // With a known axis edge we include the last column (axis column) as quads.
@@ -258,7 +266,7 @@ bool BoundaryCornerField::buildForFace(
     if(i == N && axisEdge) {
       double signX = (axisPoint_[0] >= 0.0) ? 1.0 : -1.0;
       ni = SPoint2(signX, 0.0);
-      by = 0.0;
+      by = axisPoint_[1];
     }
     GEntity *outerEnt = gf;
 
@@ -274,11 +282,13 @@ bool BoundaryCornerField::buildForFace(
       }
     }
 
-    // Blend factor: 0 at the outer edge of the corner zone, 1 at the axis column.
-    // Transitions row heights from geometric to uniform over NbCornerColumns columns.
+    // Blend factor: 0 at the outer edge of the height-control zone, 1 at the axis
+    // column.  Transitions row heights from geometric to uniform over the
+    // innermost NbHeightControl columns (the outer NbLengthControl columns keep
+    // pure BL-geometric heights).
     double alpha = 0.0;
     {
-      int i0 = std::max(0, N - nbCornerColumns_);
+      int i0 = std::max(0, N - nbHeightControl_);
       if(N > i0 && i > i0) alpha = double(i - i0) / (N - i0);
     }
 
@@ -473,8 +483,9 @@ void BoundaryCornerField::buildCornerColumns(GModel *gm)
     return;
   }
 
-  // --- Compressed section: nbCornerColumns_ columns from axisPoint outward ---
-  int N_corner = std::max(1, nbCornerColumns_);
+  // --- Compressed section: NbLengthControl + NbHeightControl columns from
+  // axisPoint outward (legacy: no length/height split, kept for reference) ---
+  int N_corner = std::max(1, nbLengthControl_ + nbHeightControl_);
   double eps;
   const double q = lBLeff_ / w0max_;
   if(N_corner < 2 || q >= 1.0 - 1e-10)
@@ -750,21 +761,27 @@ double BoundaryCornerField::operator()(double x, double y, double z,
   double dy   = y - axisPoint_[1];
   double dist = std::sqrt(dx * dx + dy * dy);
 
-  // Arc-length of the compressed corner section (used as the zone radius)
-  int nc = std::max(1, nbCornerColumns_);
+  // Zone A: constant ColWidth arc-length over NbHeightControl columns,
+  // innermost, adjacent to AxisPoint.
+  double S_A = std::max(0, nbHeightControl_) * lBLeff_;
+
+  // Zone B: geometric arc-length transition from ColWidth up to MaxColumnWidth
+  // over NbLengthControl columns, outer part of the corner zone.
+  int nl = std::max(1, nbLengthControl_);
   double eps_op;
   const double q_op = (w0max_ > 1e-100) ? lBLeff_ / w0max_ : 1.0;
-  if(nc < 2 || q_op >= 1.0 - 1e-10)
+  if(nl < 2 || q_op >= 1.0 - 1e-10)
     eps_op = 1.0;
   else
-    eps_op = std::pow(q_op, 1.0 / (nc - 1));
-  double S_corner = (std::abs(eps_op - 1.0) < 1e-10)
-      ? w0max_ * nc
-      : w0max_ * (1.0 - std::pow(eps_op, nc)) / (1.0 - eps_op);
+    eps_op = std::pow(q_op, 1.0 / (nl - 1));
+  double S_B = (std::abs(eps_op - 1.0) < 1e-10)
+      ? w0max_ * nl
+      : w0max_ * (1.0 - std::pow(eps_op, nl)) / (1.0 - eps_op);
 
-  // Within the compressed zone: interpolate from lBLeff_ (at corner) to w0max_
-  if(S_corner > 0.0 && dist < S_corner)
-    return lBLeff_ + (w0max_ - lBLeff_) * dist / S_corner;
+  if(dist < S_A)
+    return lBLeff_;
+  if(S_B > 0.0 && dist < S_A + S_B)
+    return lBLeff_ + (w0max_ - lBLeff_) * (dist - S_A) / S_B;
   return 1e22;
 }
 
@@ -782,7 +799,7 @@ std::string BoundaryDoubleCornerField::getDescription()
 
 BoundaryDoubleCornerField::BoundaryDoubleCornerField()
   : h1_(1e-3), ratio_(1.15), w0max_(0.1), lBL_(-1.0), omega_(1.0),
-    nbLayers_(30), nbCornerColumns_(10), skipAxisColumn_(0),
+    nbLayers_(30), nbLengthControl_(5), nbHeightControl_(5), skipAxisColumn_(0),
     lBLeff_(1e-3), hTotal_(0.0)
 {
   nosePoint_[0] = nosePoint_[1] = 0.0;
@@ -800,9 +817,18 @@ BoundaryDoubleCornerField::BoundaryDoubleCornerField()
     ratio_, "Geometric growth ratio between successive BL rows", &update_needed);
   options["NbLayers"] = new FieldOptionInt(
     nbLayers_, "Number of BL rows", &update_needed);
-  options["NbCornerColumns"] = new FieldOptionInt(
-    nbCornerColumns_,
-    "Number of arc-length-compressed columns from each axis point outward.",
+  options["NbLengthControl"] = new FieldOptionInt(
+    nbLengthControl_,
+    "Number of columns, outer part of each corner zone, over which the column "
+    "arc-length transitions geometrically from MaxColumnWidth down to ColWidth.  "
+    "Row heights in this region stay BL-geometric (no blending).",
+    &update_needed);
+  options["NbHeightControl"] = new FieldOptionInt(
+    nbHeightControl_,
+    "Number of columns, inner part of each corner zone (adjacent to the axis "
+    "point), over which the column arc-length is held constant at ColWidth "
+    "while the row heights blend from BL-geometric to a uniform (linspace) "
+    "distribution, reaching full uniform height at the axis point.",
     &update_needed);
   options["MaxColumnWidth"] = new FieldOptionDouble(
     w0max_,
@@ -909,7 +935,20 @@ void BoundaryDoubleCornerField::subdivideAxisEdge(
       [xMin, xMax](MVertex *v) {
         return v->x() >= xMin - 1e-14 && v->x() <= xMax + 1e-14;
       });
-    for(auto vit = rmBegin; vit != mv.end(); ++vit) delete *vit;
+    // NOTE: these vertices are NOT deleted here, even though they are being
+    // dropped from axisEdge's own bookkeeping. At this point gf still holds
+    // its *initial* (pre-BoundaryCorner) triangulation, built before this
+    // field ran, and that triangulation can still reference these exact
+    // MVertex objects as triangle corners (the axis curve is part of gf's
+    // boundary, so its 1D-mesh vertices are also gf's 2D boundary vertices).
+    // Deleting them here frees memory that's about to be read again by the
+    // surrounding meshGenerator() re-triangulation pass (modifyInitialMesh-
+    // ForBoundaryCorners -> deMeshGFace -> meshGenerator), producing a
+    // use-after-free crash with a corrupted MVertex vtable. The initial
+    // triangulation (and these orphaned vertices with it) is discarded
+    // wholesale a few lines later in the caller via deMeshGFace/gf->
+    // deleteMesh(), so simply leaking them here (bounded: at most a couple
+    // of vertices per axis corner, once per mesh generation) is safe.
     mv.erase(rmBegin, mv.end());
   } else {
     Msg::Warning("BoundaryDoubleCorner: failed to subdivide axis GEdge %d",
@@ -1003,7 +1042,7 @@ bool BoundaryDoubleCornerField::buildForFace(
   }
 
   // Find axis GVertices and GEdges at nose and tail.
-  auto findAxisEdge = [&](MVertex *axisVert) -> std::pair<GVertex *, GEdge *> {
+  auto findAxisEdge = [&](MVertex *axisVert, double axisY) -> std::pair<GVertex *, GEdge *> {
     GVertex *axisGV = nullptr;
     for(auto *gv : {ge->getBeginVertex(), ge->getEndVertex()}) {
       if(!gv || gv->mesh_vertices.empty()) continue;
@@ -1015,7 +1054,7 @@ bool BoundaryDoubleCornerField::buildForFace(
         if(adj == ge) continue;
         GVertex *other = (adj->getBeginVertex() == axisGV) ? adj->getEndVertex()
                                                             : adj->getBeginVertex();
-        if(other && std::abs(other->y()) < 1e-10) { axisEdge = adj; break; }
+        if(other && std::abs(other->y() - axisY) < 1e-10) { axisEdge = adj; break; }
       }
     }
     return {axisGV, axisEdge};
@@ -1023,8 +1062,8 @@ bool BoundaryDoubleCornerField::buildForFace(
 
   MVertex *noseVert = baseVerts.front();
   MVertex *tailVert = baseVerts.back();
-  auto [noseGV, noseAxisEdge] = findAxisEdge(noseVert);
-  auto [tailGV, tailAxisEdge] = findAxisEdge(tailVert);
+  auto [noseGV, noseAxisEdge] = findAxisEdge(noseVert, nosePoint_[1]);
+  auto [tailGV, tailAxisEdge] = findAxisEdge(tailVert, tailPoint_[1]);
 
   // N = number of inter-vertex segments to cover with quad columns.
   // When axis edges are found we include the endpoint columns; otherwise skip them
@@ -1074,7 +1113,10 @@ bool BoundaryDoubleCornerField::buildForFace(
   std::vector<std::vector<MVertex *>> grid(N + 1,
     std::vector<MVertex *>(nbLayers_ + 1, nullptr));
 
-  int nc = nbCornerColumns_;
+  // Height-blend zone size: only the innermost NbHeightControl columns at each
+  // axis end blend toward uniform row heights; the outer NbLengthControl
+  // columns keep pure BL-geometric heights.
+  int nc = nbHeightControl_;
 
   // Uniform row height that preserves the same total BL thickness as the
   // geometric series: used as the target for the corner-zone blend.
@@ -1095,15 +1137,16 @@ bool BoundaryDoubleCornerField::buildForFace(
     if(isNoseCol) {
       double signX = (nosePoint_[0] >= xMeanProfile) ? 1.0 : -1.0;
       ni = SPoint2(signX, 0.0);
-      by = 0.0;
+      by = nosePoint_[1];
     } else if(isTailCol) {
       double signX = (tailPoint_[0] >= xMeanProfile) ? 1.0 : -1.0;
       ni = SPoint2(signX, 0.0);
-      by = 0.0;
+      by = tailPoint_[1];
     }
 
-    // Blend factor: 0 at the outer edge of each corner zone, 1 at the axis column.
-    // Transitions row heights from geometric to uniform over NbCornerColumns columns.
+    // Blend factor: 0 at the outer edge of each height-control zone, 1 at the
+    // axis column.  Transitions row heights from geometric to uniform over the
+    // innermost NbHeightControl columns at each end.
     double alpha = 0.0;
     if(nc >= 2) {
       if(includeNose && i < nc)
@@ -1174,19 +1217,27 @@ double BoundaryDoubleCornerField::operator()(double x, double y, double z,
   double dist = std::min(zoneDist(nosePoint_[0], nosePoint_[1]),
                          zoneDist(tailPoint_[0], tailPoint_[1]));
 
-  int nc = std::max(1, nbCornerColumns_);
+  // Zone A: constant ColWidth arc-length over NbHeightControl columns,
+  // innermost, adjacent to the axis point.
+  double S_A = std::max(0, nbHeightControl_) * lBLeff_;
+
+  // Zone B: geometric arc-length transition from ColWidth up to MaxColumnWidth
+  // over NbLengthControl columns, outer part of the corner zone.
+  int nl = std::max(1, nbLengthControl_);
   double eps_op;
   const double q_op = (w0max_ > 1e-100) ? lBLeff_ / w0max_ : 1.0;
-  if(nc < 2 || q_op >= 1.0 - 1e-10)
+  if(nl < 2 || q_op >= 1.0 - 1e-10)
     eps_op = 1.0;
   else
-    eps_op = std::pow(q_op, 1.0 / (nc - 1));
-  double S_corner = (std::abs(eps_op - 1.0) < 1e-10)
-      ? w0max_ * nc
-      : w0max_ * (1.0 - std::pow(eps_op, nc)) / (1.0 - eps_op);
+    eps_op = std::pow(q_op, 1.0 / (nl - 1));
+  double S_B = (std::abs(eps_op - 1.0) < 1e-10)
+      ? w0max_ * nl
+      : w0max_ * (1.0 - std::pow(eps_op, nl)) / (1.0 - eps_op);
 
-  if(S_corner > 0.0 && dist < S_corner)
-    return lBLeff_ + (w0max_ - lBLeff_) * dist / S_corner;
+  if(dist < S_A)
+    return lBLeff_;
+  if(S_B > 0.0 && dist < S_A + S_B)
+    return lBLeff_ + (w0max_ - lBLeff_) * (dist - S_A) / S_B;
   return 1e22;
 }
 

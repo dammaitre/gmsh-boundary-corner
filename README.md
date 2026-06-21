@@ -166,7 +166,8 @@ Because Gmsh's `meshGFace()` calls `GFace::deleteMesh()` internally, any element
 | `Size` | double | First BL layer height `h_1` |
 | `Ratio` | double | Normal-direction geometric ratio (default 1.15) |
 | `NbLayers` | int | Number of BL layers in normal direction |
-| `NbCornerColumns` | int | Number of columns along the profile in BC zone |
+| `NbLengthControl` | int | Columns (outer part of corner zone) over which arc-length transitions geometrically to `ColWidth`; heights stay BL-geometric |
+| `NbHeightControl` | int | Columns (inner part, at the axis) of constant `ColWidth` arc-length where heights blend from BL-geometric to uniform |
 | `Delta1` | double | Arc length of last column at nose (−1 = use `Size`) |
 | `Omega` | double | Global height scaling factor (default 1.0) |
 

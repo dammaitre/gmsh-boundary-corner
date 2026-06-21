@@ -33,7 +33,8 @@ The correct approach for axisymmetric CFD:
 | `Size` | float | Height of the first boundary-layer row (`h1`) |
 | `Ratio` | float | BL growth ratio (e.g. 1.2) |
 | `NbLayers` | int | Number of BL rows in the normal direction |
-| `NbCornerColumns` | int | Number of fan columns in the tangential direction near the corner |
+| `NbLengthControl` | int | Columns (outer part of the corner zone) over which arc-length transitions geometrically to `ColWidth`; row heights stay BL-geometric |
+| `NbHeightControl` | int | Columns (inner part, adjacent to the axis point) of constant `ColWidth` arc-length, where row heights blend from BL-geometric to a uniform (linspace) distribution |
 | `MaxColumnWidth` | float | Maximum tangential column width at the StartPoint (typically = far-field `lc` on the body) |
 
 `Omega` (default 1.0) and `ColWidth` are additional optional parameters.
@@ -55,7 +56,8 @@ gmsh.model.mesh.field.setNumbers(bc, "AxisPoint",       [A, 0.0])
 gmsh.model.mesh.field.setNumber (bc, "Size",            0.012)
 gmsh.model.mesh.field.setNumber (bc, "Ratio",           1.20)
 gmsh.model.mesh.field.setNumber (bc, "NbLayers",        6)
-gmsh.model.mesh.field.setNumber (bc, "NbCornerColumns", 8)
+gmsh.model.mesh.field.setNumber (bc, "NbLengthControl", 5)
+gmsh.model.mesh.field.setNumber (bc, "NbHeightControl", 3)
 gmsh.model.mesh.field.setNumber (bc, "MaxColumnWidth",  0.06)
 
 gmsh.model.mesh.field.setAsBackgroundMesh(bc)
@@ -72,7 +74,8 @@ def add_bc(curves, axis_pt):
     gmsh.model.mesh.field.setNumber (f, "Size",            H1)
     gmsh.model.mesh.field.setNumber (f, "Ratio",           RATIO)
     gmsh.model.mesh.field.setNumber (f, "NbLayers",        N_LAY)
-    gmsh.model.mesh.field.setNumber (f, "NbCornerColumns", N_COLS)
+    gmsh.model.mesh.field.setNumber (f, "NbLengthControl", N_COLS_LEN)
+    gmsh.model.mesh.field.setNumber (f, "NbHeightControl", N_COLS_HEIGHT)
     gmsh.model.mesh.field.setNumber (f, "MaxColumnWidth",  W0_MAX)
     return f
 
