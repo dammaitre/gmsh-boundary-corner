@@ -346,6 +346,16 @@ int MeshExtrudedSurface(
       pos.insert((*it)->getBeginVertex()->mesh_vertices);
     if((*it)->getEndVertex())
       pos.insert((*it)->getEndVertex()->mesh_vertices);
+    // Some callers (e.g. BoundaryCornerField/BoundaryDoubleCornerField)
+    // splice extra vertices into an edge's 1D mesh (->lines) without adding
+    // them to ->mesh_vertices, specifically to avoid double-ownership with
+    // a GFace that also references them (that GFace's deleteMesh() would
+    // otherwise free them while the other side still holds raw pointers).
+    // Pick those up here too, so the extrusion lookup below can find them.
+    for(auto *ml : (*it)->lines) {
+      pos.insert(ml->getVertex(0));
+      pos.insert(ml->getVertex(1));
+    }
     ++it;
   }
 

@@ -923,7 +923,8 @@ void getAllBoundaryLayerVertices(GFace *gf, std::set<MVertex *> &vs)
   }
 }
 
-void laplaceSmoothing(GFace *gf, int niter, bool infinity_norm)
+void laplaceSmoothing(GFace *gf, int niter, bool infinity_norm,
+                      const std::set<MVertex *> *extraFixedVertices)
 {
   if((gf->triangles.size() > 0 && gf->triangles[0]->getPolynomialOrder() > 1) ||
      (gf->quadrangles.size() > 0 && gf->quadrangles[0]->getPolynomialOrder() > 1)){
@@ -935,6 +936,7 @@ void laplaceSmoothing(GFace *gf, int niter, bool infinity_norm)
   if(!niter) return;
   std::set<MVertex *> vs;
   getAllBoundaryLayerVertices(gf, vs);
+  if(extraFixedVertices) vs.insert(extraFixedVertices->begin(), extraFixedVertices->end());
   v2t_cont adj;
   buildVertexToElement(gf->triangles, adj);
   buildVertexToElement(gf->quadrangles, adj);

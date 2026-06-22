@@ -1870,8 +1870,17 @@ bool meshGenerator(GFace *gf, int RECUR_ITER, bool repairSelfIntersecting1dMesh,
       meshGFaceBamg(gf);
     }
     if(!infty ||
-       !(CTX::instance()->mesh.recombineAll || gf->meshAttributes.recombine))
-      laplaceSmoothing(gf, CTX::instance()->mesh.nbSmoothing, infty);
+       !(CTX::instance()->mesh.recombineAll || gf->meshAttributes.recombine)) {
+      // verts/bcVerts (BL/BC structured-quad nodes) are still classified
+      // onWhat()==gf at this point (reclassification onto their owning
+      // curve happens later) -- exclude them so laplaceSmoothing's
+      // _relocate() doesn't treat them as free interior points and move
+      // them off their intended (e.g. exactly-on-axis) position.
+      std::set<MVertex *> fixedVertices(verts);
+      fixedVertices.insert(bcVerts.begin(), bcVerts.end());
+      laplaceSmoothing(gf, CTX::instance()->mesh.nbSmoothing, infty,
+                       &fixedVertices);
+    }
   }
 
   if(debug) {

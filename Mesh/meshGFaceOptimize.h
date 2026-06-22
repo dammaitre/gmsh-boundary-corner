@@ -53,7 +53,17 @@ void buildListOfEdgeAngle(e2t_cont adj, std::vector<edge_angle> &edges_detected,
                           std::vector<edge_angle> &edges_lonly);
 void buildEdgeToElements(std::vector<MElement *> &tris, e2t_cont &adj);
 
-void laplaceSmoothing(GFace *gf, int niter = 1, bool infinity_norm = false);
+// extraFixedVertices: vertices to exclude from relocation in addition to the
+// ones returned by getAllBoundaryLayerVertices(). Needed for vertices that
+// are temporarily still classified onWhat()==gf (e.g. BoundaryCornerField /
+// BoundaryDoubleCornerField structured-quad nodes, before they get
+// reclassified onto their owning curve) but must stay fixed: without this,
+// _relocate() treats them as free interior points and can displace them by
+// a macroscopic distance when the surrounding triangulation is very sparse
+// (e.g. the small "remaining region" patch retriangulated around a
+// boundary-layer/corner structure).
+void laplaceSmoothing(GFace *gf, int niter = 1, bool infinity_norm = false,
+                      const std::set<MVertex *> *extraFixedVertices = nullptr);
 
 bool buildMeshGenerationDataStructures(
   GFace *gf, std::set<MTri3 *, compareTri3Ptr> &AllTris, bidimMeshData &data);
