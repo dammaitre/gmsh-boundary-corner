@@ -2701,18 +2701,49 @@ int ExtrudeCurve(int type, int ic, double T0, double T1, double T2, double A0,
   ExtrudePoint(type, pc->end->Num, T0, T1, T2, A0, A1, A2, X0, X1, X2, alpha,
                &CurveEnd, &ReverseEnd, 0, e);
 
+  // If both endpoints are fixed points of the transformation (e.g. both on
+  // the rotation axis for a ROTATE extrusion), ExtrudePoint() above created
+  // no "vertical" curve at either end (a point on the axis maps to itself,
+  // so ComparePosition() short-circuits before a Curve is built). Two cases
+  // produce this:
+  //  (a) the WHOLE curve lies on the axis (e.g. a straight line between two
+  //      axis points) — genuinely degenerate, no lateral surface at all
+  //      (existing behaviour: return without creating anything).
+  //  (b) only the two ENDPOINTS lie on the axis while the curve's interior
+  //      dips away from it (e.g. a full meridian profile revolved to build
+  //      a surface of revolution touching the axis at both ends). The
+  //      extruded surface is then bounded by exactly two curves: the source
+  //      curve `pc` and its rotated copy `chapeau` (a lens/digon surface).
+  //      This used to bail out entirely too (see historical FIXME), forcing
+  //      callers to split such a profile into two curves. It doesn't need
+  //      to: geometric evaluation for extruded surfaces normally goes
+  //      through the exact-extrusion path (InterpolateExtrudedSurface,
+  //      Geometry.ExactExtrusion=1 by default), which only needs the source
+  //      curve (found by index in Generatrices) and re-applies s->Extrude
+  //      directly — it never dereferences CurveBeg/CurveEnd.
+  //
+  // Distinguish (a) from (b) by checking whether `chapeau` (pc rotated by
+  // alpha) actually moved anywhere relative to pc: if every control point
+  // mapped to itself, the whole curve is axis-invariant (case a).
+  bool digon = false;
   if(!CurveBeg && !CurveEnd) {
-    return pc->Num;
+    bool wholeCurveFixed = true;
+    if(pc->Control_Points && chapeau->Control_Points &&
+       List_Nbr(pc->Control_Points) == List_Nbr(chapeau->Control_Points)) {
+      for(int i = 0; i < List_Nbr(pc->Control_Points); i++) {
+        Vertex *p0, *p1;
+        List_Read(pc->Control_Points, i, &p0);
+        List_Read(chapeau->Control_Points, i, &p1);
+        if(ComparePosition(&p0, &p1) != 0) { wholeCurveFixed = false; break; }
+      }
+    }
+    if(wholeCurveFixed) return pc->Num;
+    digon = true;
   }
-
-  // FIXME: if we extrude by rotation a (non-straight) curve defined by 2 end
-  // points, with a rotation axis going through the end points, the resulting
-  // surface would have 2 bounding edges (the axis and the curve). We cannot
-  // handle this case.
 
   if(type == BOUNDARY_LAYER)
     s = CreateSurface(NEWSURFACE(), MSH_SURF_BND_LAYER);
-  else if(!CurveBeg || !CurveEnd)
+  else if(digon || !CurveBeg || !CurveEnd)
     s = CreateSurface(NEWSURFACE(), MSH_SURF_TRIC);
   else
     s = CreateSurface(NEWSURFACE(), MSH_SURF_REGL);
@@ -2725,7 +2756,11 @@ int ExtrudeCurve(int type, int ic, double T0, double T1, double T2, double A0,
 
   ReverseChapeau = FindCurve(-chapeau->Num);
 
-  if(!CurveBeg) {
+  if(digon) {
+    List_Add(s->Generatrices, &pc);
+    List_Add(s->Generatrices, &ReverseChapeau);
+  }
+  else if(!CurveBeg) {
     List_Add(s->Generatrices, &pc);
     List_Add(s->Generatrices, &CurveEnd);
     List_Add(s->Generatrices, &ReverseChapeau);

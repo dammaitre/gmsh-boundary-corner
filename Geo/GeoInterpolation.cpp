@@ -855,6 +855,15 @@ static Vertex InterpolateRuledSurface(Surface *s, double u, double v)
       TransfiniteQua(V[0], V[1], V[2], V[3], *S[0], *S[1], *S[2], *S[3], u, v);
     if(isSphere) TransfiniteSph(*S[0], *O, &T);
   }
+  else if(List_Nbr(s->Generatrices) == 2 && s->Extrude) {
+    // "Digon" surface built by ExtrudeCurve() when both endpoints of the
+    // source curve are fixed points of the extrusion (e.g. a profile
+    // touching the rotation axis at both ends): bounded by just the source
+    // curve C[0] and its transformed copy C[1], with no "vertical" curves.
+    // Mirrors InterpolateExtrudedSurface's case-0 branch (source at index 0).
+    T = InterpolateCurve(C[0], C[0]->ubeg + (C[0]->uend - C[0]->ubeg) * u, 0);
+    s->Extrude->Extrude(v, T.Pos.X, T.Pos.Y, T.Pos.Z);
+  }
   else if(List_Nbr(s->Generatrices) >= 3) {
     S[0] = C[0]->beg;
     S[1] = C[1]->beg;
