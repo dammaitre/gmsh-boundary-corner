@@ -174,9 +174,17 @@ static void extrudeMesh(GFace *from, GRegion *to, MVertexRTree &pos)
         double x = v->x(), y = v->y(), z = v->z();
         ep->Extrude(j, k + 1, x, y, z);
         if(j != ep->mesh.NbLayer - 1 || k != ep->mesh.NbElmLayer[j] - 1) {
-          MVertex *newv = new MVertex(x, y, z, to);
-          to->mesh_vertices.push_back(newv);
-          pos.insert(newv);
+          // Points invariant under the extrusion transform (e.g. vertices
+          // exactly on a rotation axis) extrude to their own position,
+          // which may already be registered in `pos` (see the analogous
+          // fix/comment in Mesh/meshGFaceExtruded.cpp::copyMesh). Reuse
+          // the existing vertex instead of silently duplicating it.
+          MVertex *existing = pos.find(x, y, z);
+          if(!existing) {
+            MVertex *newv = new MVertex(x, y, z, to);
+            to->mesh_vertices.push_back(newv);
+            pos.insert(newv);
+          }
         }
       }
     }
@@ -241,6 +249,16 @@ static void collectAllVertices(GRegion *gr, std::vector<MVertex *> &out)
       if((*ite)->getEndVertex())
         out.insert(out.end(), (*ite)->getEndVertex()->mesh_vertices.begin(),
                   (*ite)->getEndVertex()->mesh_vertices.end());
+      // Some callers (e.g. BoundaryCornerField/BoundaryDoubleCornerField)
+      // splice extra vertices into an edge's 1D mesh (->lines) without
+      // adding them to ->mesh_vertices, to avoid double-ownership with a
+      // GFace that also references them (see the matching comment in
+      // Mesh/meshGFaceExtruded.cpp::MeshExtrudedSurface). Pick those up
+      // here too, so the volume extrusion lookup below can find them.
+      for(auto *ml : (*ite)->lines) {
+        out.push_back(ml->getVertex(0));
+        out.push_back(ml->getVertex(1));
+      }
       ++ite;
     }
     ++itf;
