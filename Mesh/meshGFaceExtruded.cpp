@@ -188,6 +188,27 @@ static void copyMesh(GFace *from, GFace *to, MVertexRTree &pos)
     double x = v->x(), y = v->y(), z = v->z();
     ep->Extrude(ep->mesh.NbLayer - 1, ep->mesh.NbElmLayer[ep->mesh.NbLayer - 1],
                 x, y, z);
+    // Points invariant under the extrusion transform (e.g. vertices exactly
+    // on a rotation axis) extrude to their own position, which may already
+    // be registered in `pos` -- typically a vertex shared by construction
+    // across every entity touching the axis (see the boundary-edge ->lines
+    // seeding above, and BoundaryCornerField/BoundaryDoubleCornerField axis
+    // columns). Creating a fresh vertex there instead of reusing the
+    // existing one would silently duplicate it: two distinct MVertex
+    // objects at the same location, referenced by different faces, which
+    // downstream tools (e.g. gmshToFoam, matching by node identity) treat
+    // as unconnected -- leaving those faces as spurious boundary faces
+    // instead of merging into internal ones.
+    MVertex *existing = pos.find(x, y, z);
+    if(existing) {
+      if(getenv("GMSH_DEBUG_DUP")) {
+        Msg::Info("DUPDBG copyMesh to=%d: reusing existing vertex %d at "
+                  "(%.16g,%.16g,%.16g) for src vertex %d instead of "
+                  "duplicating it",
+                  to->tag(), existing->getNum(), x, y, z, v->getNum());
+      }
+      continue;
+    }
     MVertex *newv = 0;
     if(to->geomType() != GEntity::DiscreteSurface &&
        to->geomType() != GEntity::BoundaryLayerSurface) {
