@@ -56,6 +56,8 @@ private:
   double lBL_;                         // ColWidth : arc dernière colonne à l'AxisPoint ; -1 = Size
   double omega_;                       // Omega           : facteur hauteur (défaut 1.0)
   int    skipAxisColumn_;              // SkipAxisColumn  : 1 = omit the y=0 axis column (for 3D revolve)
+  double farSize_;                     // FarSize  : target far-field size zone C grows toward; <=0 disables zone C
+  double farRatio_;                    // FarRatio : geometric growth ratio used in zone C
 
   // Données calculées par computeParameters() / buildCornerColumns()
   double axisPoint_[2];
@@ -98,6 +100,8 @@ private:
   std::list<double> tailPointList_;   // TailPoint [x_tail, 0.0]
   double h1_, ratio_, w0max_, lBL_, omega_;
   int    nbLayers_, nbLengthControl_, nbHeightControl_, skipAxisColumn_;
+  double farSize_;                     // FarSize  : target far-field size zone C grows toward; <=0 disables zone C
+  double farRatio_;                    // FarRatio : geometric growth ratio used in zone C
 
   double nosePoint_[2], tailPoint_[2];
   double lBLeff_, hTotal_;

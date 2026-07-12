@@ -35,7 +35,7 @@ std::string BoundaryCornerField::getDescription()
 BoundaryCornerField::BoundaryCornerField()
   : h1_(1e-3), ratio_(1.15), nbLayers_(30),
     nbLengthControl_(5), nbHeightControl_(5), w0max_(0.1), lBL_(-1.0), omega_(1.0),
-    skipAxisColumn_(0), lBLeff_(1e-3), hTotal_(0.0)
+    skipAxisColumn_(0), farSize_(-1.0), farRatio_(1.2), lBLeff_(1e-3), hTotal_(0.0)
 {
   axisPoint_[0] = axisPoint_[1] = 0.0;
 
@@ -58,9 +58,8 @@ BoundaryCornerField::BoundaryCornerField()
   options["NbHeightControl"] = new FieldOptionInt(
     nbHeightControl_,
     "Number of columns, inner part of the corner zone (adjacent to AxisPoint), "
-    "over which the column arc-length is held constant at ColWidth while the "
-    "row heights blend from BL-geometric to a uniform (linspace) distribution, "
-    "reaching full uniform height at AxisPoint.",
+    "over which the column arc-length is held constant at ColWidth.  Row "
+    "heights stay BL-geometric all the way to AxisPoint.",
     &update_needed);
   options["MaxColumnWidth"] = new FieldOptionDouble(
     w0max_,
@@ -70,7 +69,7 @@ BoundaryCornerField::BoundaryCornerField()
   options["ColWidth"] = new FieldOptionDouble(
     lBL_,
     "Arc-length of the innermost BC column at AxisPoint (corner cell).  "
-    "-1 = use Size (h1)",
+    "-1 = use the height of the last (outermost) BL row",
     &update_needed);
   options["Omega"] = new FieldOptionDouble(
     omega_, "Height scale factor for BC rows (default 1.0)", &update_needed);
@@ -81,11 +80,22 @@ BoundaryCornerField::BoundaryCornerField()
     "OpenFOAM axisymmetric); the axis column creates zero-volume cells under "
     "rotation.  Default 0 (column included, correct for 2D axisymmetric).",
     &update_needed);
+  options["FarSize"] = new FieldOptionDouble(
+    farSize_,
+    "Target far-field size that the size field grows toward geometrically "
+    "(zone C, beyond MaxColumnWidth) at FarRatio, smoothing the transition to "
+    "the background mesh size instead of jumping straight to it.  "
+    "<= 0 disables zone C (legacy behaviour: unconstrained beyond zone B).",
+    &update_needed);
+  options["FarRatio"] = new FieldOptionDouble(
+    farRatio_, "Geometric growth ratio used in zone C (FarSize transition)",
+    &update_needed);
 }
 
 void BoundaryCornerField::computeParameters()
 {
-  lBLeff_ = (lBL_ > 0.0) ? lBL_ : h1_;
+  double hLastRow = h1_ * std::pow(ratio_, nbLayers_ - 1);
+  lBLeff_ = (lBL_ > 0.0) ? lBL_ : hLastRow;
   if(lBLeff_ < 1e-100) lBLeff_ = 1e-100;
 
   {
@@ -249,10 +259,6 @@ bool BoundaryCornerField::buildForFace(
   std::vector<std::vector<MVertex *>> grid(N + 1,
     std::vector<MVertex *>(nbLayers_ + 1, nullptr));
 
-  // Uniform row height that preserves the same total BL thickness as the
-  // geometric series: used as the target for the corner-zone blend.
-  const double h_max_uniform = hTotal_ * omega_ / nbLayers_;
-
   for(int i = 0; i <= N; i++) {
     MVertex *bv = baseVerts[bcStart + i];
     grid[i][0] = bv;
@@ -282,23 +288,12 @@ bool BoundaryCornerField::buildForFace(
       }
     }
 
-    // Blend factor: 0 at the outer edge of the height-control zone, 1 at the axis
-    // column.  Transitions row heights from geometric to uniform over the
-    // innermost NbHeightControl columns (the outer NbLengthControl columns keep
-    // pure BL-geometric heights).
-    double alpha = 0.0;
-    {
-      int i0 = std::max(0, N - nbHeightControl_);
-      if(N > i0 && i > i0) alpha = double(i - i0) / (N - i0);
-    }
-
     for(int k = 1; k <= nbLayers_; k++) {
       if(useStitch && i == 0 && k < nbLayers_)
         continue;  // intermediate col-0 vertices unused in stitch path
-      double hk_geo = (std::abs(ratio_ - 1.0) < 1e-10)
+      double hk = (std::abs(ratio_ - 1.0) < 1e-10)
                       ? h1_ * omega_ * k
                       : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
-      double hk = hk_geo + alpha * (h_max_uniform * k - hk_geo);
       grid[i][k] = new MVertex(bx + ni.x() * hk, by + ni.y() * hk, 0.0, outerEnt);
     }
 
@@ -782,6 +777,15 @@ double BoundaryCornerField::operator()(double x, double y, double z,
     return lBLeff_;
   if(S_B > 0.0 && dist < S_A + S_B)
     return lBLeff_ + (w0max_ - lBLeff_) * (dist - S_A) / S_B;
+
+  // Zone C: geometric growth from MaxColumnWidth up to FarSize, smoothing the
+  // handoff to the background mesh size instead of returning unconstrained
+  // (1e22) right at the edge of zone B.
+  if(farSize_ > 0.0 && farSize_ > w0max_) {
+    double distC = dist - (S_A + S_B);
+    double size = w0max_ * std::pow(farRatio_, distC / w0max_);
+    return std::min(farSize_, size);
+  }
   return 1e22;
 }
 
@@ -800,7 +804,7 @@ std::string BoundaryDoubleCornerField::getDescription()
 BoundaryDoubleCornerField::BoundaryDoubleCornerField()
   : h1_(1e-3), ratio_(1.15), w0max_(0.1), lBL_(-1.0), omega_(1.0),
     nbLayers_(30), nbLengthControl_(5), nbHeightControl_(5), skipAxisColumn_(0),
-    lBLeff_(1e-3), hTotal_(0.0)
+    farSize_(-1.0), farRatio_(1.2), lBLeff_(1e-3), hTotal_(0.0)
 {
   nosePoint_[0] = nosePoint_[1] = 0.0;
   tailPoint_[0] = tailPoint_[1] = 0.0;
@@ -826,9 +830,8 @@ BoundaryDoubleCornerField::BoundaryDoubleCornerField()
   options["NbHeightControl"] = new FieldOptionInt(
     nbHeightControl_,
     "Number of columns, inner part of each corner zone (adjacent to the axis "
-    "point), over which the column arc-length is held constant at ColWidth "
-    "while the row heights blend from BL-geometric to a uniform (linspace) "
-    "distribution, reaching full uniform height at the axis point.",
+    "point), over which the column arc-length is held constant at ColWidth.  "
+    "Row heights stay BL-geometric all the way to the axis point.",
     &update_needed);
   options["MaxColumnWidth"] = new FieldOptionDouble(
     w0max_,
@@ -836,7 +839,8 @@ BoundaryDoubleCornerField::BoundaryDoubleCornerField()
     &update_needed);
   options["ColWidth"] = new FieldOptionDouble(
     lBL_,
-    "Arc-length of the innermost BC column at each axis point. -1 = use Size.",
+    "Arc-length of the innermost BC column at each axis point.  "
+    "-1 = use the height of the last (outermost) BL row.",
     &update_needed);
   options["Omega"] = new FieldOptionDouble(
     omega_, "Height scale factor for BC rows (default 1.0)", &update_needed);
@@ -845,11 +849,22 @@ BoundaryDoubleCornerField::BoundaryDoubleCornerField()
     "Set to 1 to omit the structured quad columns exactly on y=0. "
     "Use for 3D wedge revolve meshes.",
     &update_needed);
+  options["FarSize"] = new FieldOptionDouble(
+    farSize_,
+    "Target far-field size that the size field grows toward geometrically "
+    "(zone C, beyond MaxColumnWidth) at FarRatio, smoothing the transition to "
+    "the background mesh size instead of jumping straight to it.  "
+    "<= 0 disables zone C (legacy behaviour: unconstrained beyond zone B).",
+    &update_needed);
+  options["FarRatio"] = new FieldOptionDouble(
+    farRatio_, "Geometric growth ratio used in zone C (FarSize transition)",
+    &update_needed);
 }
 
 void BoundaryDoubleCornerField::computeParameters()
 {
-  lBLeff_ = (lBL_ > 0.0) ? lBL_ : h1_;
+  double hLastRow = h1_ * std::pow(ratio_, nbLayers_ - 1);
+  lBLeff_ = (lBL_ > 0.0) ? lBL_ : hLastRow;
   if(lBLeff_ < 1e-100) lBLeff_ = 1e-100;
 
   {
@@ -1113,15 +1128,6 @@ bool BoundaryDoubleCornerField::buildForFace(
   std::vector<std::vector<MVertex *>> grid(N + 1,
     std::vector<MVertex *>(nbLayers_ + 1, nullptr));
 
-  // Height-blend zone size: only the innermost NbHeightControl columns at each
-  // axis end blend toward uniform row heights; the outer NbLengthControl
-  // columns keep pure BL-geometric heights.
-  int nc = nbHeightControl_;
-
-  // Uniform row height that preserves the same total BL thickness as the
-  // geometric series: used as the target for the corner-zone blend.
-  const double h_max_uniform = hTotal_ * omega_ / nbLayers_;
-
   for(int i = 0; i <= N; i++) {
     MVertex *bv = baseVertForCol(i);
     grid[i][0] = bv;
@@ -1144,24 +1150,10 @@ bool BoundaryDoubleCornerField::buildForFace(
       by = tailPoint_[1];
     }
 
-    // Blend factor: 0 at the outer edge of each height-control zone, 1 at the
-    // axis column.  Transitions row heights from geometric to uniform over the
-    // innermost NbHeightControl columns at each end.
-    double alpha = 0.0;
-    if(nc >= 2) {
-      if(includeNose && i < nc)
-        alpha = std::max(alpha, double(nc - 1 - i) / (nc - 1));
-      if(includeTail && i > N - nc)
-        alpha = std::max(alpha, double(i - (N - nc + 1)) / (nc - 1));
-    } else {
-      if(isNoseCol || isTailCol) alpha = 1.0;
-    }
-
     for(int k = 1; k <= nbLayers_; k++) {
-      double hk_geo = (std::abs(ratio_ - 1.0) < 1e-10)
+      double hk = (std::abs(ratio_ - 1.0) < 1e-10)
                       ? h1_ * omega_ * k
                       : h1_ * omega_ * (std::pow(ratio_, k) - 1.0) / (ratio_ - 1.0);
-      double hk = hk_geo + alpha * (h_max_uniform * k - hk_geo);
       grid[i][k] = new MVertex(bx + ni.x() * hk, by + ni.y() * hk, 0.0, gf);
     }
   }
@@ -1238,6 +1230,12 @@ double BoundaryDoubleCornerField::operator()(double x, double y, double z,
     return lBLeff_;
   if(S_B > 0.0 && dist < S_A + S_B)
     return lBLeff_ + (w0max_ - lBLeff_) * (dist - S_A) / S_B;
+
+  if(farSize_ > 0.0 && farSize_ > w0max_) {
+    double distC = dist - (S_A + S_B);
+    double size = w0max_ * std::pow(farRatio_, distC / w0max_);
+    return std::min(farSize_, size);
+  }
   return 1e22;
 }
 
